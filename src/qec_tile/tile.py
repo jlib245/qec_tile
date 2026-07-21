@@ -56,7 +56,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .gf2 import rank2
+from .gf2 import nullspace2, quotient_basis, rank2
 
 Edge = tuple[str, int, int]
 
@@ -87,6 +87,17 @@ class TileCode:
     def k(self) -> int:
         return self.n - rank2(self.HX) - rank2(self.HZ)
 
+    def logicals(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(LX, LZ)``, each ``(k, n)`` over GF(2).
+
+        X-type logicals are ker(H_Z) modulo the X-stabilizers, and vice versa.
+        An X-type residual error ``r`` (one that already matches the Z-check
+        syndrome) is a logical failure iff ``LZ @ r != 0``.
+        """
+        LX = quotient_basis(self.HX, nullspace2(self.HZ))
+        LZ = quotient_basis(self.HZ, nullspace2(self.HX))
+        return LX, LZ
+
     def __str__(self) -> str:
         return (f"TileCode(B={self.B}, layout={self.L1}x{self.L2}, "
                 f"n={self.n}, k={self.k}, "
@@ -116,47 +127,85 @@ def build_tile_code(x_h, x_v, B: int, L1: int, L2: int) -> TileCode:
     # Qubits are the union of the bulk anchors' B x B boxes.  For the square
     # layout that union is the rectangle [0, L1+g) x [0, L2+g), but taking it
     # literally keeps the rest of the construction layout-agnostic.
-    qubits = sorted({(o, i + dx, j + dy)
-                     for o in "HV"
+    qubits = sorted({(orient, i + dx, j + dy)
+                     for orient in "HV"
                      for (i, j) in bulk
                      for dx in range(B)
                      for dy in range(B)})
-    idx = {q: i for i, q in enumerate(qubits)}
+    col_of = {qubit: col for col, qubit in enumerate(qubits)}
 
     def assemble(tile, anchors):
-        rows, kept = [], []
-        for (ax, ay) in anchors:
-            r = np.zeros(len(qubits), dtype=np.uint8)
-            for (o, dx, dy) in tile:
-                q = (o, ax + dx, ay + dy)
-                if q in idx:                 # truncate to available qubits
-                    r[idx[q]] ^= 1
-            if r.any():                      # a tile entirely off the lattice
-                rows.append(r)
-                kept.append((ax, ay))
-        return (np.array(rows, dtype=np.uint8) if rows
-                else np.zeros((0, len(qubits)), dtype=np.uint8)), kept
+        """One check per anchor: stamp the tile, cut whatever misses a qubit."""
+        checks, kept_anchors = [], []
+        for (anchor_x, anchor_y) in anchors:
+            check = np.zeros(len(qubits), dtype=np.uint8)
+            for (orient, dx, dy) in tile:
+                qubit = (orient, anchor_x + dx, anchor_y + dy)
+                if qubit in col_of:          # truncate to available qubits
+                    check[col_of[qubit]] ^= 1
+            if check.any():                  # a tile entirely off the lattice
+                checks.append(check)
+                kept_anchors.append((anchor_x, anchor_y))
+        return (np.array(checks, dtype=np.uint8) if checks
+                else np.zeros((0, len(qubits)), dtype=np.uint8)), kept_anchors
 
-    HX, xa = assemble(x_tile, bulk + x_boundary)
-    HZ, za = assemble(z_tile, bulk + z_boundary)
+    HX, x_anchors = assemble(x_tile, bulk + x_boundary)
+    HZ, z_anchors = assemble(z_tile, bulk + z_boundary)
 
     # Paper's final pass: a qubit no X-check (or no Z-check) touches leaves no
     # syndrome, so it is dropped; then the checks that are now empty go too.
     # One pass suffices — an emptied check held none of the surviving qubits,
     # so removing it cannot uncover any of them.
-    live = (HX.sum(0) > 0) & (HZ.sum(0) > 0)
-    if not live.all():
-        qubits = [q for q, keep in zip(qubits, live) if keep]
-        HX, HZ = HX[:, live], HZ[:, live]
-        HX, xa = drop_empty_rows(HX, xa)
-        HZ, za = drop_empty_rows(HZ, za)
+    covered = (HX.sum(0) > 0) & (HZ.sum(0) > 0)
+    if not covered.all():
+        qubits = [qubit for qubit, is_covered in zip(qubits, covered)
+                  if is_covered]
+        HX, HZ = HX[:, covered], HZ[:, covered]
+        HX, x_anchors = drop_empty_checks(HX, x_anchors)
+        HZ, z_anchors = drop_empty_checks(HZ, z_anchors)
 
     if ((HX @ HZ.T) % 2).any():
         raise ValueError("stabilizers do not commute — X-tile violates (T2)")
-    return TileCode(HX, HZ, qubits, xa, za, B, L1, L2)
+    return TileCode(HX, HZ, qubits, x_anchors, z_anchors, B, L1, L2)
 
 
-def drop_empty_rows(H: np.ndarray, anchors: list) -> tuple[np.ndarray, list]:
-    """Rows of ``H`` with any support, and the matching anchors."""
-    keep = H.any(axis=1)
-    return H[keep], [a for a, k in zip(anchors, keep) if k]
+def drop_empty_checks(checks: np.ndarray,
+                      anchors: list) -> tuple[np.ndarray, list]:
+    """Rows of ``checks`` with any support left, and the matching anchors."""
+    nonempty = checks.any(axis=1)
+    return checks[nonempty], [anchor for anchor, is_kept
+                              in zip(anchors, nonempty) if is_kept]
+
+
+# Tiles from the paper, as (X_H, X_V).  Table 1 rows 3 and 4 share a tile and
+# differ only in layout, so the name records the tile, not the code.
+TILES: dict[str, tuple[list, list]] = {
+    # Table 1
+    "b3w6": ([(0, 0), (2, 1), (2, 2)], [(0, 2), (1, 2), (2, 0)]),
+    "b3w8": ([(0, 0), (0, 1), (0, 2), (2, 0)],
+             [(0, 0), (0, 2), (1, 1), (2, 2)]),
+    "b4w8": ([(0, 0), (0, 3), (2, 2), (3, 0)],
+             [(0, 1), (1, 0), (1, 1), (3, 3)]),
+    "b4w10": ([(0, 0), (1, 0), (2, 1), (2, 3), (3, 0)],
+              [(0, 3), (1, 0), (3, 1), (3, 2), (3, 3)]),
+}
+
+# Table 2: all eight depicted weight-6 B=3 X-tiles giving [[288,8,12]] at 10x10.
+# The paper's full count of 16 is these plus their X<->Z swaps.
+TABLE2: list[tuple[list, list]] = [
+    ([(0, 0), (0, 1), (2, 2)], [(0, 2), (1, 0), (2, 0)]),
+    ([(0, 0), (0, 1), (2, 2)], [(0, 2), (1, 2), (2, 0)]),
+    ([(0, 0), (1, 0), (2, 2)], [(0, 1), (0, 2), (2, 0)]),
+    ([(0, 0), (1, 0), (2, 2)], [(0, 2), (2, 0), (2, 1)]),
+    ([(0, 0), (1, 2), (2, 2)], [(0, 1), (0, 2), (2, 0)]),
+    ([(0, 0), (1, 2), (2, 2)], [(0, 2), (2, 0), (2, 1)]),
+    ([(0, 0), (2, 1), (2, 2)], [(0, 2), (1, 0), (2, 0)]),
+    ([(0, 0), (2, 1), (2, 2)], [(0, 2), (1, 2), (2, 0)]),
+]
+
+
+def paper_code(name: str, L1: int, L2: int) -> TileCode:
+    """Convenience: build one of the paper's tiles at a given layout size."""
+    x_h, x_v = TILES[name]
+    B = 3 if name.startswith("b3") else 4
+    return build_tile_code(x_h, x_v, B, L1, L2)

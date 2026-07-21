@@ -1,60 +1,51 @@
-"""타일 코드 조립 — 앵커 배치와 절단(truncation)."""
+"""Tile code assembly — anchor placement, truncation and pruning."""
 import numpy as np
 import pytest
 
 from qec_tile.gf2 import rank2
-from qec_tile.tile import build_tile_code
+from qec_tile.tile import TABLE2, build_tile_code, paper_code
 
-# 논문 타일 두 개. 이름표(TILES 딕셔너리)는 Step 4에서 붙인다.
 B3W6 = ([(0, 0), (2, 1), (2, 2)], [(0, 2), (1, 2), (2, 0)])
 B4W8 = ([(0, 0), (0, 3), (2, 2), (3, 0)], [(0, 1), (1, 0), (1, 1), (3, 3)])
 
-# dy가 {0,1}뿐이라 박스 세로를 다 안 쓰는 타일 — 미커버 큐빗이 생긴다.
+# dy only spans {0, 1}, so the box is not fully used and qubits go uncovered.
 FLAT = ([(0, 0), (1, 1)], [(0, 1), (2, 0)])
 
 
 def test_qubits_are_unique_and_counted_by_the_formula():
-    """n = 2(L1+g)(L2+g) — 큐빗은 black 박스들의 합집합."""
     c = build_tile_code(*B3W6, 3, 4, 5)
     g = 3 - 1
     assert c.n == len(c.qubits) == 2 * (4 + g) * (5 + g)
-    assert len(set(c.qubits)) == c.n            # 중복 없음
-    assert all(o in "HV" for o, _, _ in c.qubits)
+    assert len(set(c.qubits)) == c.n
+    assert all(orient in "HV" for orient, _, _ in c.qubits)
 
 
 @pytest.mark.parametrize("B,x_h,x_v,L1,L2",
                          [(3, *B3W6, 4, 4), (3, *B3W6, 5, 3), (4, *B4W8, 5, 3)])
 def test_qubits_are_the_union_of_bulk_boxes(B, x_h, x_v, L1, L2):
-    """큐빗은 bulk 박스들의 합집합이다.
-
-    bulk 앵커가 직사각형이면 박스들이 한 칸씩 겹치며 빈틈을 메우므로 그
-    합집합이 [0,L1+g) x [0,L2+g) 와 정확히 같다 — 코드가 range()로 쓰는 근거.
-    레이아웃이 직사각형이 아니면 이 동치가 깨지고 합집합을 직접 구해야 한다.
-    """
+    """A rectangular layout makes that union the plain range the code uses."""
     c = build_tile_code(x_h, x_v, B, L1, L2)
-    union = {(o, i + dx, j + dy)
-             for o in "HV"
+    union = {(orient, i + dx, j + dy)
+             for orient in "HV"
              for i in range(L1) for j in range(L2)
              for dx in range(B) for dy in range(B)}
     assert set(c.qubits) == union
 
 
 def test_stabilizers_commute():
-    """(T2)로 만든 Z-타일이므로 HX·HZ^T는 mod 2로 0."""
     c = build_tile_code(*B3W6, 3, 5, 5)
     assert not ((c.HX @ c.HZ.T) % 2).any()
 
 
 def test_checks_are_independent():
-    """토릭/BB 코드와 달리 타일 코드는 검사 간 종속성이 전혀 없다."""
+    """Unlike toric/BB codes, tile codes have no check dependencies at all."""
     c = build_tile_code(*B3W6, 3, 10, 10)
-    assert rank2(c.HX) == c.HX.shape[0] == 140      # bulk 100 + 경계 40
+    assert rank2(c.HX) == c.HX.shape[0] == 140      # 100 bulk + 40 boundary
     assert rank2(c.HZ) == c.HZ.shape[0] == 140
 
 
 @pytest.mark.parametrize("B,L1,L2", [(3, 5, 5), (3, 6, 9), (4, 5, 5), (4, 7, 6)])
 def test_k_is_2g_squared_regardless_of_layout(B, L1, L2):
-    """k = 2(B-1)^2. 레이아웃을 키워도 논리 큐빗 수는 그대로다."""
     x_h, x_v = B3W6 if B == 3 else B4W8
     c = build_tile_code(x_h, x_v, B, L1, L2)
     g = B - 1
@@ -63,55 +54,46 @@ def test_k_is_2g_squared_regardless_of_layout(B, L1, L2):
 
 
 def test_bulk_checks_are_untruncated_and_uniform():
-    """bulk 앵커는 전부 온전한 타일을 얹는다 — 벌크가 균일하다는 뜻."""
+    """Every bulk anchor carries a full-weight tile — the stencil premise."""
     c = build_tile_code(*B3W6, 3, 10, 10)
-    bulk = [w for a, w in zip(c.x_anchors, c.HX.sum(1))
-            if 0 <= a[0] < 10 and 0 <= a[1] < 10]
-    assert len(bulk) == 100 and set(bulk) == {6}
+    weights = [w for anchor, w in zip(c.x_anchors, c.HX.sum(1))
+               if 0 <= anchor[0] < 10 and 0 <= anchor[1] < 10]
+    assert len(weights) == 100 and set(weights) == {6}
 
 
 def test_boundary_checks_are_truncated():
-    """경계 앵커는 격자 밖으로 삐져나가 잘린다 — 경계가 생기는 지점."""
     c = build_tile_code(*B3W6, 3, 10, 10)
-    edge = [w for a, w in zip(c.x_anchors, c.HX.sum(1))
-            if not (0 <= a[0] < 10 and 0 <= a[1] < 10)]
-    assert len(edge) == 40
-    assert max(edge) <= 6 and min(edge) < 6      # 최소 하나는 잘려 있다
+    weights = [w for anchor, w in zip(c.x_anchors, c.HX.sum(1))
+               if not (0 <= anchor[0] < 10 and 0 <= anchor[1] < 10)]
+    assert len(weights) == 40
+    assert max(weights) <= 6 and min(weights) < 6
 
 
 def test_empty_checks_are_dropped():
-    """타일이 통째로 격자 밖이면 그 검사는 아예 버린다 (논문 step 4)."""
+    """A tile landing entirely off the lattice yields no check at all."""
     c = build_tile_code(*B3W6, 3, 10, 10)
-    assert c.HX.shape[0] == len(c.x_anchors)     # 행과 앵커가 일대일
+    assert c.HX.shape[0] == len(c.x_anchors)
     assert c.HZ.shape[0] == len(c.z_anchors)
-    assert c.HX.any(axis=1).all()                # 0인 행이 없다
+    assert c.HX.any(axis=1).all()
     assert c.HZ.any(axis=1).all()
 
 
 @pytest.mark.parametrize("B,x_h,x_v", [(3, *B3W6), (4, *B4W8)])
 def test_pruning_is_a_noop_for_paper_tiles(B, x_h, x_v):
-    """논문 타일은 모든 큐빗이 X도 Z도 받으므로 지울 게 없다."""
     c = build_tile_code(x_h, x_v, B, 6, 6)
     assert c.n == 2 * (6 + B - 1) ** 2
 
 
 def test_uncovered_qubits_are_removed():
-    """논문 마지막 단계: X 또는 Z를 하나도 못 받는 큐빗은 제거한다.
-
-    그런 큐빗은 오류가 나도 신드롬을 남기지 않아 디코더가 손댈 수 없다.
-    """
+    """A qubit with no X (or no Z) check leaves no syndrome to decode from."""
     c = build_tile_code(*FLAT, 3, 6, 6)
-    assert c.n < 2 * (6 + 2) ** 2                  # 실제로 줄었고
-    assert (c.HX.sum(0) > 0).all()                 # 남은 큐빗은 전부
-    assert (c.HZ.sum(0) > 0).all()                 # X도 Z도 받는다
+    assert c.n < 2 * (6 + 2) ** 2
+    assert (c.HX.sum(0) > 0).all()
+    assert (c.HZ.sum(0) > 0).all()
 
 
 def test_one_pass_pruning_is_already_a_fixpoint():
-    """큐빗 제거 -> 검사 제거를 반복할 필요가 없다.
-
-    비게 된 검사는 살아남은 큐빗을 하나도 안 건드리므로, 그 검사를 지워도
-    남은 큐빗의 커버 수는 줄지 않는다. 그래서 1패스가 곧 고정점이다.
-    """
+    """An emptied check held no surviving qubit, so it uncovers none."""
     c = build_tile_code(*FLAT, 3, 6, 6)
     assert not ((c.HX.sum(0) == 0) | (c.HZ.sum(0) == 0)).any()
     assert c.HX.any(axis=1).all() and c.HZ.any(axis=1).all()
@@ -120,8 +102,7 @@ def test_one_pass_pruning_is_already_a_fixpoint():
 
 
 def test_pruning_preserves_commutation():
-    """제거되는 큐빗은 한쪽 타입의 검사에 아예 안 들어 있으므로,
-    열을 지워도 X-Z 겹침 수는 변하지 않는다."""
+    """A dropped qubit was absent from one type entirely, so overlaps hold."""
     c = build_tile_code(*FLAT, 3, 6, 6)
     assert not ((c.HX @ c.HZ.T) % 2).any()
 
@@ -129,3 +110,30 @@ def test_pruning_preserves_commutation():
 def test_offsets_outside_the_box_are_rejected():
     with pytest.raises(ValueError, match="outside"):
         build_tile_code([(0, 0), (3, 1)], [(0, 2)], 3, 6, 6)
+
+
+# --- the paper's tables ---------------------------------------------------
+
+# (tile name, layout, n, k) — Table 1.  Rows 3 and 4 share the b4w8 tile and
+# differ only in layout.  The distances (12/14/13/19) are not checked: computing
+# them is NP-hard.
+TABLE1 = [
+    ("b3w6", 10, 288, 8),     # [[288,8,12]]
+    ("b3w8", 10, 288, 8),     # [[288,8,14]]
+    ("b4w8", 9, 288, 18),     # [[288,18,13]]
+    ("b4w8", 13, 512, 18),    # [[512,18,19]]
+    ("b4w10", 13, 512, 18),   # appendix, randomized search
+]
+
+
+@pytest.mark.parametrize("name,L,n,k", TABLE1)
+def test_table1(name, L, n, k):
+    c = paper_code(name, L, L)
+    assert (c.n, c.k) == (n, k)
+
+
+@pytest.mark.parametrize("x_h,x_v", TABLE2)
+def test_table2_all_give_288_8(x_h, x_v):
+    c = build_tile_code(x_h, x_v, 3, 10, 10)
+    assert (c.n, c.k) == (288, 8)
+    assert c.HX.sum(1).max() == 6 and c.HZ.sum(1).max() == 6
