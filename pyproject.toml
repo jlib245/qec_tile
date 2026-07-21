@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "qec-tile"
+version = "0.1.0"
+description = "Tile codes — CSS codes on a lattice with boundary (arXiv:2504.09171)"
+requires-python = ">=3.13"
+dependencies = ["numpy>=2.2.6"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/qec_tile"]
+# Pin g++-11 for C++20 (system default is g++-9.4). Drop this line to build
+# elsewhere; the CMakeLists auto-detects g++-11+ when the compiler isn't pinned.
+cmake.args = ["-DCMAKE_CXX_COMPILER=g++-11"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

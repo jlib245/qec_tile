@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# native build artifacts
+build/
+build-*/
+*.so
+*.egg-info/
+
+.env
+
+# local agent rules
+.claude/
