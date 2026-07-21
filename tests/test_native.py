@@ -1,4 +1,4 @@
-"""C++ 확장이 빌드되어 import 되는지 — 툴체인 검증용."""
+"""The nanobind extension builds and imports — a toolchain check."""
 from qec_tile import add, parity
 
 
@@ -7,6 +7,6 @@ def test_add():
 
 
 def test_parity():
-    assert parity([1, 0, 1, 1]) == 1   # 1이 셋 -> 홀수
-    assert parity([1, 1, 0, 0]) == 0   # 1이 둘 -> 짝수
+    assert parity([1, 0, 1, 1]) == 1
+    assert parity([1, 1, 0, 0]) == 0
     assert parity([]) == 0
