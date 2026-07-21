@@ -32,6 +32,10 @@ Anchors sit at their box's lower-left corner; with bulk block ``L1 x L2`` and
 
 The paper's figures color these black, red and blue respectively.
 
+The anchor sets above are the paper's (unrotated) square layout.  The qubit
+set is built as a literal union of boxes, so swapping in another bulk layout
+only means changing those three lists.
+
 Qubits are the union of the boxes over bulk anchors only, so bulk tiles are
 never truncated while the boundary tiles hang off the lattice and get cut.
 What an x_boundary tile loses is always out of range in ``y`` and what a
@@ -103,17 +107,21 @@ def build_tile_code(x_h, x_v, B: int, L1: int, L2: int) -> TileCode:
     z_tile = [("H", x, y) for x, y in z_h] + [("V", x, y) for x, y in z_v]
 
     g = B - 1
-    qubits = sorted((o, x, y)
-                    for o in "HV"
-                    for x in range(L1 + g)
-                    for y in range(L2 + g))
-    idx = {q: i for i, q in enumerate(qubits)}
-
     bulk = [(i, j) for i in range(L1) for j in range(L2)]
     x_boundary = [(i, j) for i in range(L1)
                   for j in [*range(-g, 0), *range(L2, L2 + g)]]
     z_boundary = [(i, j) for j in range(L2)
                   for i in [*range(-g, 0), *range(L1, L1 + g)]]
+
+    # Qubits are the union of the bulk anchors' B x B boxes.  For the square
+    # layout that union is the rectangle [0, L1+g) x [0, L2+g), but taking it
+    # literally keeps the rest of the construction layout-agnostic.
+    qubits = sorted({(o, i + dx, j + dy)
+                     for o in "HV"
+                     for (i, j) in bulk
+                     for dx in range(B)
+                     for dy in range(B)})
+    idx = {q: i for i, q in enumerate(qubits)}
 
     def assemble(tile, anchors):
         rows, kept = [], []

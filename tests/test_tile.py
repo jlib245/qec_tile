@@ -22,6 +22,23 @@ def test_qubits_are_unique_and_counted_by_the_formula():
     assert all(o in "HV" for o, _, _ in c.qubits)
 
 
+@pytest.mark.parametrize("B,x_h,x_v,L1,L2",
+                         [(3, *B3W6, 4, 4), (3, *B3W6, 5, 3), (4, *B4W8, 5, 3)])
+def test_qubits_are_the_union_of_bulk_boxes(B, x_h, x_v, L1, L2):
+    """큐빗은 bulk 박스들의 합집합이다.
+
+    bulk 앵커가 직사각형이면 박스들이 한 칸씩 겹치며 빈틈을 메우므로 그
+    합집합이 [0,L1+g) x [0,L2+g) 와 정확히 같다 — 코드가 range()로 쓰는 근거.
+    레이아웃이 직사각형이 아니면 이 동치가 깨지고 합집합을 직접 구해야 한다.
+    """
+    c = build_tile_code(x_h, x_v, B, L1, L2)
+    union = {(o, i + dx, j + dy)
+             for o in "HV"
+             for i in range(L1) for j in range(L2)
+             for dx in range(B) for dy in range(B)}
+    assert set(c.qubits) == union
+
+
 def test_stabilizers_commute():
     """(T2)로 만든 Z-타일이므로 HX·HZ^T는 mod 2로 0."""
     c = build_tile_code(*B3W6, 3, 5, 5)
