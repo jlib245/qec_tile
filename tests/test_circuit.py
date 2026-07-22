@@ -2,7 +2,8 @@
 import numpy as np
 import pytest
 
-from qec_tile.circuit import circuit_failure_rate, memory_z_circuit
+from qec_tile.circuit import (circuit_failure_rate, memory_z_base,
+                              memory_z_circuit)
 from qec_tile.tile import paper_code
 
 SMALL = ("b3w6", 4, 4)
@@ -54,6 +55,16 @@ def test_rounds_must_be_positive():
     code = paper_code(*SMALL)
     with pytest.raises(ValueError, match="rounds"):
         memory_z_circuit(code, rounds=0, p=0.01)
+
+
+def test_every_qubit_has_coordinates():
+    """The timeslice diagram draws the real lattice only if all qubits have
+    distinct coordinates."""
+    code = paper_code(*SMALL)
+    circuit = memory_z_base(code, rounds=1)
+    coords = circuit.get_final_qubit_coordinates()
+    assert len(coords) == code.n + code.HX.shape[0] + code.HZ.shape[0]
+    assert len({tuple(v) for v in coords.values()}) == len(coords)
 
 
 def test_zero_noise_circuit_never_fails():

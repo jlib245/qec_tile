@@ -8,10 +8,11 @@ anchor, two checks of the same type can never collide in a slot; truncated
 boundary checks simply skip the slots they lost.  X and Z layers are kept in
 disjoint slots (depth ~ 2w), trading depth for scheduling simplicity.
 
-Noise model (single parameter ``p``): DEPOLARIZE2(p) after every CNOT, a flip
-probability ``p`` on every measurement, and a flip after every reset.  Data
-qubits idling during ancilla work take no extra noise — a deliberate v1
-simplification, so thresholds here are optimistic.
+``memory_z_base`` emits the circuit noise-free with TICKs between moments;
+noise is a post-processing step through ``noise_model.NoiseModel`` (vendored
+Gidney implementation), which injects gate noise plus per-moment idle noise.
+``memory_z_circuit`` keeps the simple uniform-``p`` model as a wrapper, and
+``NoiseModel.SI1000(p)`` gives the superconducting-inspired canonical model.
 
 Detectors: data start in |0>, so Z-check outcomes are deterministic in round
 one and compared round-to-round afterwards; X-check outcomes only from round
@@ -25,6 +26,7 @@ import stim
 from ldpc.ckt_noise import detector_error_model_to_check_matrices
 
 from .decode import DECODERS
+from .noise_model import NoiseModel
 
 
 def _schedule(H, anchors, qubits) -> tuple[list, list[dict]]:
@@ -42,8 +44,12 @@ def _schedule(H, anchors, qubits) -> tuple[list, list[dict]]:
     return sorted(slots), per_check
 
 
-def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
-    """``rounds`` noisy syndrome rounds protecting logical Z at noise ``p``."""
+def memory_z_base(code, rounds: int) -> stim.Circuit:
+    """Noise-free memory-Z circuit for ``rounds`` syndrome rounds.
+
+    Moments are separated by TICKs so a ``noise_model.NoiseModel`` can inject
+    gate noise and, crucially, idle noise per moment as a post-processing step.
+    """
     if rounds < 1:
         raise ValueError("rounds must be >= 1")
     n = code.n
@@ -54,14 +60,24 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
     x_slots, x_checks = _schedule(code.HX, code.x_anchors, code.qubits)
     z_slots, z_checks = _schedule(code.HZ, code.z_anchors, code.qubits)
     _, LZ = code.logicals()
-    noisy = p > 0
 
     circuit = stim.Circuit()
+    # Coordinates make stim's timeslice diagrams draw the actual lattice:
+    # data qubits at edge midpoints, ancillas inside their anchor's box
+    # (0.25/0.75 offsets keep bulk X and Z ancillas apart).
+    for col, (orient, x, y) in enumerate(code.qubits):
+        xy = (x + 0.5, y) if orient == "H" else (x, y + 0.5)
+        circuit.append("QUBIT_COORDS", [col], xy)
+    for i, (anchor_x, anchor_y) in enumerate(code.x_anchors):
+        circuit.append("QUBIT_COORDS", [x_anc[i]],
+                       (anchor_x + 0.25, anchor_y + 0.25))
+    for j, (anchor_x, anchor_y) in enumerate(code.z_anchors):
+        circuit.append("QUBIT_COORDS", [z_anc[j]],
+                       (anchor_x + 0.75, anchor_y + 0.75))
+
     circuit.append("R", data + z_anc)          # |0> data and Z ancillas
     circuit.append("RX", x_anc)                # |+> X ancillas
-    if noisy:
-        circuit.append("X_ERROR", data + z_anc, p)
-        circuit.append("Z_ERROR", x_anc, p)
+    circuit.append("TICK")
 
     for round_index in range(rounds):
         # X layer: ancilla is the control (measures X on its support).
@@ -69,22 +85,17 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
             pairs = [q for i, offsets in enumerate(x_checks)
                      if slot in offsets for q in (x_anc[i], offsets[slot])]
             circuit.append("CX", pairs)
-            if noisy:
-                circuit.append("DEPOLARIZE2", pairs, p)
+            circuit.append("TICK")
         # Z layer: data is the control.
         for slot in z_slots:
             pairs = [q for j, offsets in enumerate(z_checks)
                      if slot in offsets for q in (offsets[slot], z_anc[j])]
             circuit.append("CX", pairs)
-            if noisy:
-                circuit.append("DEPOLARIZE2", pairs, p)
+            circuit.append("TICK")
 
         # Measure and reset the ancillas (mx results, then mz).
-        circuit.append("MRX", x_anc, p if noisy else 0.0)
-        circuit.append("MR", z_anc, p if noisy else 0.0)
-        if noisy:                              # reset side of the MR is noisy
-            circuit.append("Z_ERROR", x_anc, p)
-            circuit.append("X_ERROR", z_anc, p)
+        circuit.append("MRX", x_anc)
+        circuit.append("MR", z_anc)
 
         stride = mx + mz                       # measurements per round
         for j in range(mz):
@@ -99,9 +110,10 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
                 current = -(mz + mx - i)
                 circuit.append("DETECTOR", [stim.target_rec(current),
                                             stim.target_rec(current - stride)])
+        circuit.append("TICK")
 
     # Final transversal Z readout of the data reconstructs each Z check.
-    circuit.append("M", data, p if noisy else 0.0)
+    circuit.append("M", data)
     for j in range(mz):
         targets = [stim.target_rec(-(n - col))
                    for col in np.flatnonzero(code.HZ[j])]
@@ -112,6 +124,21 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
                    for col in np.flatnonzero(logical)]
         circuit.append("OBSERVABLE_INCLUDE", targets, l)
     return circuit
+
+
+def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
+    """Memory-Z circuit under uniform noise: every gate, measurement and reset
+    fails with probability ``p``, no idle noise.
+
+    Kept for the "circuit" benchmark axis; the canonical alternative is
+    ``NoiseModel.SI1000(p).noisy_circuit(memory_z_base(code, rounds))``.
+    """
+    uniform = NoiseModel(
+        idle=0.0,
+        measure_reset_idle=0.0,
+        noisy_gates={"CX": p, "R": p, "RX": p, "M": p, "MR": p, "MRX": p},
+    )
+    return uniform.noisy_circuit(memory_z_base(code, rounds))
 
 
 def circuit_failure_rate(circuit: stim.Circuit, shots: int, decoder: str,
