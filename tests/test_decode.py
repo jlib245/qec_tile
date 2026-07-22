@@ -26,7 +26,7 @@ def test_correction_always_matches_syndrome():
 def test_single_errors_are_always_corrected():
     """d >= 3, so any weight-1 error is uniquely decodable."""
     code = paper_code(*SMALL)
-    decoder = make_decoder(code.HZ, p=0.05)
+    decoder = make_decoder(code.HZ, 0.05)
     _, LZ = code.logicals()
     for i in range(code.n):
         e = np.zeros(code.n, dtype=np.uint8)
@@ -74,8 +74,17 @@ def test_unknown_decoder_is_rejected():
 def test_decoder_prior_matches_the_sampling_rate():
     """BP needs the true rate as its prior; make_decoder ties them together."""
     code = paper_code(*SMALL)
-    decoder = make_decoder(code.HZ, p=0.07)
+    decoder = make_decoder(code.HZ, 0.07)
     assert np.allclose(decoder.error_channel, 0.07)
+
+
+def test_make_decoder_accepts_a_channel_vector():
+    """Per-column priors, for space-time matrices with mixed p and q."""
+    code = paper_code(*SMALL)
+    channel = np.full(code.n, 0.03)
+    channel[0] = 0.11
+    decoder = make_decoder(code.HZ, channel)
+    assert np.allclose(decoder.error_channel, channel)
 
 
 def test_a_wrong_prior_decodes_worse():
