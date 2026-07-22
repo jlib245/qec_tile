@@ -14,6 +14,11 @@ one routine that both scales and stays exact:
 ``distance_upper_bound``  randomised, always a valid logical, never below d.
 ``distance_ilp``          exact, as an integer program; scales further, but
                           how far is a property of the solver, not a promise.
+
+The two scalable ones pair up: bound the distance cheaply, then let the ILP
+confirm it.  Measured on b3w6 at 10x10 ([[288, 8, 12]]), the randomised search
+reaches 12 in about a second, and the ILP proves nothing of weight 11 or less
+exists in ~32 min (2*k = 16 subproblems, ~2 min each, capped at that bound).
 """
 from __future__ import annotations
 

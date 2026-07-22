@@ -25,3 +25,6 @@ cmake.args = ["-DCMAKE_CXX_COMPILER=g++-11"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Deselected by default; run with `pytest -m slow`.
+addopts = "-m 'not slow'"
+markers = ["slow: minutes-long exact checks (e.g. ILP distance on n=288)"]

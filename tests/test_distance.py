@@ -68,3 +68,16 @@ def test_ilp_is_the_min_over_both_sectors():
 def test_unknown_sector_is_rejected():
     with pytest.raises(ValueError, match="sector"):
         distance_bruteforce(paper_code(*SMALL), sector="y")
+
+
+@pytest.mark.slow
+def test_paper_288_8_12_distance():
+    """Reproduce Table 1's [[288, 8, 12]]: bound with sampling, prove with ILP.
+
+    ~30 min: the ILP alone is 16 subproblems of a couple of minutes each.
+    """
+    code = paper_code("b3w6", 10, 10)
+    bound = distance_upper_bound(code, trials=200, seed=1)
+    assert bound == 12                              # a real logical of weight 12
+    assert distance_ilp(code, upper_bound=bound - 1) is None   # none lighter
+
