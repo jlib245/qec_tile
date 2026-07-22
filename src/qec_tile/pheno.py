@@ -1,7 +1,8 @@
 """Phenomenological noise — the space-time decoding matrices (X sector).
 
 Syndrome measurement is repeated ``T`` times and each measured syndrome bit
-flips with probability ``q``.  Decoding works on syndrome differences
+flips with probability ``meas_error`` (the literature's ``q``).  Decoding
+works on syndrome differences
 (detectors) ``D_t = sigma_t xor sigma_{t-1}``:
 
     D_t = HZ e_t  xor  u_{t-1} xor u_t
@@ -41,8 +42,10 @@ def spacetime_matrices(code, rounds: int) -> tuple[np.ndarray, np.ndarray]:
     return H, L
 
 
-def spacetime_channel(code, rounds: int, p: float, q: float) -> np.ndarray:
-    """Per-column priors: ``p`` on data columns, ``q`` on measurement ones."""
+def spacetime_channel(code, rounds: int, p: float,
+                      meas_error: float) -> np.ndarray:
+    """Per-column priors: ``p`` on data columns, ``meas_error`` on measurement
+    ones (the literature's ``q``)."""
     m, n = code.HZ.shape
     return np.concatenate([np.full(rounds * n, p),
-                           np.full((rounds - 1) * m, q)])
+                           np.full((rounds - 1) * m, meas_error)])

@@ -69,7 +69,7 @@ def test_channel_layout():
     code = paper_code(*SMALL)
     T = 3
     m, n = code.HZ.shape
-    channel = spacetime_channel(code, rounds=T, p=0.01, q=0.02)
+    channel = spacetime_channel(code, rounds=T, p=0.01, meas_error=0.02)
     assert channel.shape == (T * n + (T - 1) * m,)
     assert (channel[:T * n] == 0.01).all()
     assert (channel[T * n:] == 0.02).all()
@@ -78,14 +78,14 @@ def test_channel_layout():
 def test_zero_noise_never_fails():
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=3)
-    channel = spacetime_channel(code, rounds=3, p=0.0, q=0.0)
+    channel = spacetime_channel(code, rounds=3, p=0.0, meas_error=0.0)
     assert failure_rate(H, L, channel, shots=50, decoder="bposd", seed=0) == 0.0
 
 
 def test_seed_is_deterministic():
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=3)
-    channel = spacetime_channel(code, rounds=3, p=0.03, q=0.03)
+    channel = spacetime_channel(code, rounds=3, p=0.03, meas_error=0.03)
     a = failure_rate(H, L, channel, shots=100, decoder="bposd", seed=5)
     b = failure_rate(H, L, channel, shots=100, decoder="bposd", seed=5)
     assert a == b
@@ -95,8 +95,8 @@ def test_measurement_noise_hurts():
     """At the same p, adding measurement noise cannot help."""
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=4)
-    quiet = spacetime_channel(code, rounds=4, p=0.04, q=0.0)
-    noisy = spacetime_channel(code, rounds=4, p=0.04, q=0.08)
+    quiet = spacetime_channel(code, rounds=4, p=0.04, meas_error=0.0)
+    noisy = spacetime_channel(code, rounds=4, p=0.04, meas_error=0.08)
     r_quiet = failure_rate(H, L, quiet, shots=600, decoder="bposd", seed=1)
     r_noisy = failure_rate(H, L, noisy, shots=600, decoder="bposd", seed=1)
     assert r_quiet <= r_noisy
