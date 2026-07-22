@@ -14,8 +14,7 @@ FLAT = ([(0, 0), (1, 1)], [(0, 1), (2, 0)])
 
 def test_qubits_are_unique_and_counted_by_the_formula():
     c = build_tile_code(*B3W6, 3, 4, 5)
-    g = 3 - 1
-    assert c.n == len(c.qubits) == 2 * (4 + g) * (5 + g)
+    assert c.n == len(c.qubits) == 2 * (4 + 3 - 1) * (5 + 3 - 1)
     assert len(set(c.qubits)) == c.n
     assert all(orient in "HV" for orient, _, _ in c.qubits)
 
@@ -48,9 +47,8 @@ def test_checks_are_independent():
 def test_k_is_2g_squared_regardless_of_layout(B, L1, L2):
     x_h, x_v = B3W6 if B == 3 else B4W8
     c = build_tile_code(x_h, x_v, B, L1, L2)
-    g = B - 1
-    assert c.n == 2 * (L1 + g) * (L2 + g)
-    assert c.k == 2 * g * g
+    assert c.n == 2 * (L1 + B - 1) * (L2 + B - 1)
+    assert c.k == 2 * (B - 1) ** 2
 
 
 def test_bulk_checks_are_untruncated_and_uniform():

@@ -23,12 +23,11 @@ A tile is a subset of those. Condition (T2) fixes the Z-tile from the X-tile
 
 Layout
 ------
-Anchors sit at their box's lower-left corner; with bulk block ``L1 x L2`` and
-``g = B - 1``::
+Anchors sit at their box's lower-left corner; with bulk block ``L1 x L2``::
 
-    bulk       (X and Z):  i in [0, L1),              j in [0, L2)
-    x_boundary (X only):   i in [0, L1),              j in [-g, 0) u [L2, L2+g)
-    z_boundary (Z only):   i in [-g, 0) u [L1, L1+g), j in [0, L2)
+    bulk       (X and Z):  i in [0, L1),                    j in [0, L2)
+    x_boundary (X only):   i in [0, L1),                    j in [-(B-1), 0) u [L2, L2+B-1)
+    z_boundary (Z only):   i in [-(B-1), 0) u [L1, L1+B-1), j in [0, L2)
 
 The paper's figures color these black, red and blue respectively.
 
@@ -42,8 +41,8 @@ What an x_boundary tile loses is always out of range in ``y`` and what a
 z_boundary tile loses is out of range in ``x``, so a cut qubit never sits in a
 tile of the opposite type — the (T2) overlap parity survives truncation.
 
-Hence ``n = 2*(L1+g)*(L2+g)``, and every check is independent so ``k = 2*g**2``
-whatever the layout size.
+Hence ``n = 2*(L1+B-1)*(L2+B-1)``, and every check is independent so
+``k = 2*(B-1)**2`` whatever the layout size.
 
 The paper closes with a pruning pass: drop every qubit that no X-stabilizer or
 no Z-stabilizer acts on, then drop the stabilizers left empty by that.  For the
@@ -61,7 +60,7 @@ from .gf2 import nullspace2, quotient_basis, rank2
 Edge = tuple[str, int, int]
 
 
-def dual_tile(x_h, x_v, B: int) -> tuple[list, list]:
+def z_tile_from_x(x_h, x_v, B: int) -> tuple[list, list]:
     """(T2): the Z-tile determined by the X-tile."""
     z_v = [(B - 1 - x, B - 1 - y) for (x, y) in x_h]
     z_h = [(B - 1 - x, B - 1 - y) for (x, y) in x_v]
@@ -113,20 +112,19 @@ def build_tile_code(x_h, x_v, B: int, L1: int, L2: int) -> TileCode:
         if not (0 <= x < B and 0 <= y < B):
             raise ValueError(f"offset ({x},{y}) outside the {B}x{B} box")
 
-    z_h, z_v = dual_tile(x_h, x_v, B)
+    z_h, z_v = z_tile_from_x(x_h, x_v, B)
     x_tile = [("H", x, y) for x, y in x_h] + [("V", x, y) for x, y in x_v]
     z_tile = [("H", x, y) for x, y in z_h] + [("V", x, y) for x, y in z_v]
 
-    g = B - 1
     bulk = [(i, j) for i in range(L1) for j in range(L2)]
     x_boundary = [(i, j) for i in range(L1)
-                  for j in [*range(-g, 0), *range(L2, L2 + g)]]
+                  for j in [*range(-(B - 1), 0), *range(L2, L2 + B - 1)]]
     z_boundary = [(i, j) for j in range(L2)
-                  for i in [*range(-g, 0), *range(L1, L1 + g)]]
+                  for i in [*range(-(B - 1), 0), *range(L1, L1 + B - 1)]]
 
     # Qubits are the union of the bulk anchors' B x B boxes.  For the square
-    # layout that union is the rectangle [0, L1+g) x [0, L2+g), but taking it
-    # literally keeps the rest of the construction layout-agnostic.
+    # layout that union is the rectangle [0, L1+B-1) x [0, L2+B-1), but taking
+    # it literally keeps the rest of the construction layout-agnostic.
     qubits = sorted({(orient, i + dx, j + dy)
                      for orient in "HV"
                      for (i, j) in bulk

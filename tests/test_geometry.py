@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from qec_tile.tile import dual_tile
+from qec_tile.tile import z_tile_from_x
 
 # (B, X_H, X_V) — the paper's b3w6 and b4w8 tiles
 TILES = [
@@ -23,20 +23,20 @@ def overlap(a: set, b: set, dx: int, dy: int) -> int:
 
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_dual_is_an_involution(B, x_h, x_v):
-    z_h, z_v = dual_tile(x_h, x_v, B)
-    back_h, back_v = dual_tile(z_h, z_v, B)
+    z_h, z_v = z_tile_from_x(x_h, x_v, B)
+    back_h, back_v = z_tile_from_x(z_h, z_v, B)
     assert set(back_h) == set(x_h) and set(back_v) == set(x_v)
 
 
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_dual_stays_inside_the_box(B, x_h, x_v):
-    z_h, z_v = dual_tile(x_h, x_v, B)
+    z_h, z_v = z_tile_from_x(x_h, x_v, B)
     assert all(0 <= x < B and 0 <= y < B for x, y in z_h + z_v)
 
 
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_dual_preserves_weight(B, x_h, x_v):
-    z_h, z_v = dual_tile(x_h, x_v, B)
+    z_h, z_v = z_tile_from_x(x_h, x_v, B)
     assert (len(z_h), len(z_v)) == (len(x_v), len(x_h))
 
 
@@ -44,7 +44,7 @@ def test_dual_preserves_weight(B, x_h, x_v):
 def test_every_relative_overlap_is_even(B, x_h, x_v):
     """Why (T2) exists: even overlap is what makes X and Z commute."""
     X = as_edges(x_h, x_v)
-    Z = as_edges(*dual_tile(x_h, x_v, B))
+    Z = as_edges(*z_tile_from_x(x_h, x_v, B))
     for dx in range(-B, B + 1):
         for dy in range(-B, B + 1):
             assert overlap(X, Z, dx, dy) % 2 == 0, f"shift ({dx},{dy})"
@@ -53,7 +53,7 @@ def test_every_relative_overlap_is_even(B, x_h, x_v):
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_h_and_v_overlaps_are_equal(B, x_h, x_v):
     """The mechanism: the H and V overlaps match, so the total is twice one."""
-    z_h, z_v = dual_tile(x_h, x_v, B)
+    z_h, z_v = z_tile_from_x(x_h, x_v, B)
     XH, XV = as_edges(x_h, []), as_edges([], x_v)
     ZH, ZV = as_edges(z_h, []), as_edges([], z_v)
     for dx in range(-B, B + 1):
@@ -72,7 +72,7 @@ def test_even_overlap_holds_for_random_tiles():
                                    replace=False)]
         x_h, x_v = pick(), pick()
         X = as_edges(x_h, x_v)
-        Z = as_edges(*dual_tile(x_h, x_v, B))
+        Z = as_edges(*z_tile_from_x(x_h, x_v, B))
         for dx in range(-B, B + 1):
             for dy in range(-B, B + 1):
                 assert overlap(X, Z, dx, dy) % 2 == 0
