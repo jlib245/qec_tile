@@ -15,7 +15,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "cairosvg>=2.7",
+    "matplotlib>=3.10",
+    "pytest>=8",
+]
 
 [tool.scikit-build]
 minimum-version = "0.10"

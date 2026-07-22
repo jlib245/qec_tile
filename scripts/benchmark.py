@@ -10,6 +10,10 @@ Noise models (--noise, explicit on purpose):
     capacity   i.i.d. X errors, perfect syndrome measurement
     pheno      phenomenological: measurement bits flip too (--meas-error,
                default = p), --rounds rounds of measurement (default: L)
+    circuit    memory-Z with uniform noise: every gate, measurement and
+               reset fails with p, no idle noise
+    si1000     memory-Z under SI1000 (Gidney 2021): superconducting-inspired,
+               2q gates p, measure 5p, idle p/10, measure-idle 2p
 
 Overriding --meas-error or --rounds changes the numbers without changing the
 default filename; pass --out explicitly in that case.
@@ -25,8 +29,10 @@ import csv
 import os
 import time
 
-from qec_tile.circuit import circuit_failure_rate, memory_z_circuit
+from qec_tile.circuit import (circuit_failure_rate, memory_z_base,
+                              memory_z_circuit)
 from qec_tile.decode import DECODERS, failure_rate, logical_error_rate
+from qec_tile.noise_model import NoiseModel
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile.tile import paper_code
 
@@ -61,7 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--decoder", required=True, choices=sorted(DECODERS))
     ap.add_argument("--noise", required=True,
-                    choices=["capacity", "pheno", "circuit"])
+                    choices=["capacity", "pheno", "circuit", "si1000"])
     ap.add_argument("--tile", default="b3w6")
     ap.add_argument("--Ls", default="4,6,8,10", type=parse_ints)
     ap.add_argument("--ps", default="0.04:0.10:7", type=parse_floats)
@@ -108,9 +114,13 @@ def main():
                     channel = spacetime_channel(code, rounds, p, meas_error)
                     rate = failure_rate(H, L_obs, channel, args.shots,
                                         args.decoder, seed=args.seed)
-                else:                          # circuit: p is baked in
+                else:                          # circuit noise: p is baked in
                     meas_error = ""
-                    circuit = memory_z_circuit(code, rounds, p)
+                    if args.noise == "circuit":
+                        circuit = memory_z_circuit(code, rounds, p)
+                    else:                      # si1000
+                        circuit = NoiseModel.SI1000(p).noisy_circuit(
+                            memory_z_base(code, rounds))
                     rate = circuit_failure_rate(circuit, args.shots,
                                                 args.decoder, seed=args.seed)
                 row = dict(tile=args.tile, decoder=args.decoder,
