@@ -11,6 +11,7 @@ dependencies = [
     "ldpc>=2.4.1",
     "numpy>=2.2.6",
     "scipy>=1.14",
+    "stim>=1.16.0",
 ]
 
 [dependency-groups]

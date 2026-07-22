@@ -8,11 +8,11 @@ file, so a sweep can be extended or resumed without redoing work.
 
 Noise models (--noise, explicit on purpose):
     capacity   i.i.d. X errors, perfect syndrome measurement
-    pheno      phenomenological: measurement bits flip too (q, default q=p),
-               --rounds rounds of measurement (default: rounds = L)
+    pheno      phenomenological: measurement bits flip too (--meas-error,
+               default = p), --rounds rounds of measurement (default: L)
 
-Overriding --q or --rounds changes the numbers without changing the default
-filename; pass --out explicitly in that case.
+Overriding --meas-error or --rounds changes the numbers without changing the
+default filename; pass --out explicitly in that case.
 
 Usage:
     python scripts/benchmark.py --decoder bposd --noise capacity
@@ -25,12 +25,13 @@ import csv
 import os
 import time
 
+from qec_tile.circuit import circuit_failure_rate, memory_z_circuit
 from qec_tile.decode import DECODERS, failure_rate, logical_error_rate
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile.tile import paper_code
 
-FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p", "q",
-          "seed", "shots", "fails", "rate", "sec"]
+FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
+          "meas_error", "seed", "shots", "fails", "rate", "sec"]
 
 
 def parse_floats(spec: str) -> list[float]:
@@ -59,18 +60,22 @@ def already_done(path: str) -> set[tuple]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--decoder", required=True, choices=sorted(DECODERS))
-    ap.add_argument("--noise", required=True, choices=["capacity", "pheno"])
+    ap.add_argument("--noise", required=True,
+                    choices=["capacity", "pheno", "circuit"])
     ap.add_argument("--tile", default="b3w6")
     ap.add_argument("--Ls", default="4,6,8,10", type=parse_ints)
     ap.add_argument("--ps", default="0.04:0.10:7", type=parse_floats)
     ap.add_argument("--rounds", type=int, default=None,
-                    help="pheno only; default: rounds = L")
-    ap.add_argument("--q", type=float, default=None,
-                    help="pheno only; default: q = p")
+                    help="pheno/circuit; default: rounds = L")
+    ap.add_argument("--meas-error", type=float, default=None,
+                    help="pheno only: syndrome-bit flip probability; "
+                         "default: same as p")
     ap.add_argument("--shots", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.noise != "pheno" and args.meas_error is not None:
+        ap.error("--meas-error only applies to --noise pheno")
 
     if args.out is None:
         args.out = (f"data/{args.tile}_{args.decoder}_{args.noise}"
@@ -85,8 +90,8 @@ def main():
             writer.writeheader()
         for L in args.Ls:
             code = paper_code(args.tile, L, L)
+            rounds = 1 if args.noise == "capacity" else (args.rounds or L)
             if args.noise == "pheno":
-                rounds = args.rounds or L
                 H, L_obs = spacetime_matrices(code, rounds)   # p-independent
             for p in args.ps:
                 if (L, p) in done:
@@ -94,18 +99,25 @@ def main():
                     continue
                 start = time.time()
                 if args.noise == "capacity":
-                    rounds, q = 1, 0.0
+                    meas_error = 0.0
                     rate = logical_error_rate(code, p, args.shots,
                                               args.decoder, seed=args.seed)
-                else:
-                    q = p if args.q is None else args.q
-                    channel = spacetime_channel(code, rounds, p, q)
+                elif args.noise == "pheno":
+                    meas_error = (p if args.meas_error is None
+                                  else args.meas_error)
+                    channel = spacetime_channel(code, rounds, p, meas_error)
                     rate = failure_rate(H, L_obs, channel, args.shots,
                                         args.decoder, seed=args.seed)
+                else:                          # circuit: p is baked in
+                    meas_error = ""
+                    circuit = memory_z_circuit(code, rounds, p)
+                    rate = circuit_failure_rate(circuit, args.shots,
+                                                args.decoder, seed=args.seed)
                 row = dict(tile=args.tile, decoder=args.decoder,
                            noise=args.noise, rounds=rounds, L=L, n=code.n,
-                           k=code.k, p=p, q=q, seed=args.seed,
-                           shots=args.shots, fails=round(rate * args.shots),
+                           k=code.k, p=p, meas_error=meas_error,
+                           seed=args.seed, shots=args.shots,
+                           fails=round(rate * args.shots),
                            rate=rate, sec=round(time.time() - start, 1))
                 writer.writerow(row)
                 f.flush()

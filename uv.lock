@@ -463,6 +463,7 @@ dependencies = [
     { name = "ldpc" },
     { name = "numpy" },
     { name = "scipy" },
+    { name = "stim" },
 ]
 
 [package.dev-dependencies]
@@ -475,6 +476,7 @@ requires-dist = [
     { name = "ldpc", specifier = ">=2.4.1" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "scipy", specifier = ">=1.14" },
+    { name = "stim", specifier = ">=1.16.0" },
 ]
 
 [package.metadata.requires-dev]
