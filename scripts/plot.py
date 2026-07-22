@@ -57,22 +57,24 @@ def main():
         args.out = default_out(args.csv)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    # One curve per (decoder, L); carry n along for the legend label.
+    # One curve per (decoder, noise, L); carry n along for the legend label.
+    # Old CSVs predate the noise column and were all code capacity.
     curves: dict[tuple, list] = defaultdict(list)
     for row in load(args.csv):
-        key = (row["decoder"], int(row["L"]), int(row["n"]), int(row["k"]))
+        key = (row["decoder"], row.get("noise", "capacity"),
+               int(row["L"]), int(row["n"]), int(row["k"]))
         curves[key].append((float(row["p"]), int(row["fails"]),
                             int(row["shots"])))
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    for (decoder, L, n, k), points in sorted(curves.items()):
+    for (decoder, noise, L, n, k), points in sorted(curves.items()):
         points.sort()
         ps = [p for p, _, _ in points]
         rates = [fails / shots for _, fails, shots in points]
         errs = [math.sqrt(max(r * (1 - r), 1e-12) / shots)
                 for r, (_, _, shots) in zip(rates, points)]
         ax.errorbar(ps, rates, yerr=errs, marker="o", capsize=2,
-                    label=f"[[{n},{k}]] L={L} ({decoder})")
+                    label=f"[[{n},{k}]] L={L} ({decoder}, {noise})")
 
     ax.set_xlabel("physical error rate  p")
     ax.set_ylabel("logical error rate")
