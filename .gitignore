@@ -13,3 +13,6 @@ build-*/
 
 # local agent rules
 .claude/
+
+# benchmark outputs
+data/
