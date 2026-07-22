@@ -35,21 +35,32 @@ def make_decoder(H: np.ndarray, p: float, *, max_iter: int = 50,
     )
 
 
-def sample_residuals(code, p: float, shots: int, seed: int | None = None):
+# Decoder registry.  A future NN decoder registers its own builder here; there
+# is deliberately no default, so every run records which decoder produced it.
+DECODERS = {"bposd": make_decoder}
+
+
+def sample_residuals(code, p: float, shots: int, decoder: str,
+                     seed: int | None = None):
     """Yield the residual ``e ^ e_hat`` for each decoded shot (X sector)."""
+    build = DECODERS.get(decoder)
+    if build is None:
+        raise ValueError(
+            f"unknown decoder {decoder!r}; have {sorted(DECODERS)}")
     rng = np.random.default_rng(seed)
-    decoder = make_decoder(code.HZ, p)
+    decoder_obj = build(code.HZ, p)
     for _ in range(shots):
         e = (rng.random(code.n) < p).astype(np.uint8)
         syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
-        e_hat = decoder.decode(syndrome)
+        e_hat = decoder_obj.decode(syndrome)
         yield (e ^ e_hat) % 2
 
 
-def logical_error_rate(code, p: float, shots: int,
+def logical_error_rate(code, p: float, shots: int, decoder: str,
                        seed: int | None = None) -> float:
     """Fraction of shots that end in a logical X failure at rate ``p``."""
     _, LZ = code.logicals()
     failures = sum(bool(((LZ @ residual) % 2).any())
-                   for residual in sample_residuals(code, p, shots, seed))
+                   for residual in sample_residuals(code, p, shots, decoder,
+                                                    seed))
     return failures / shots
