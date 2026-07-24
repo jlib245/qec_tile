@@ -10,7 +10,9 @@ requires-python = ">=3.13"
 dependencies = [
     "ldpc>=2.4.1",
     "numpy>=2.2.6",
+    "python-dotenv>=1.2.2",
     "scipy>=1.14",
+    "sinter>=1.16.0",
     "stim>=1.16.0",
 ]
 
