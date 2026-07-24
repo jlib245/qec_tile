@@ -34,6 +34,8 @@ from qec_tile.circuit import (circuit_failure_rate, memory_z_base,
 from qec_tile.decode import DECODERS, failure_rate, logical_error_rate
 from qec_tile.noise_model import NoiseModel
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
+from qec_tile import config
+from qec_tile.sinter_sampling import collect
 from qec_tile.tile import paper_code
 
 FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
@@ -52,6 +54,41 @@ def parse_floats(spec: str) -> list[float]:
 
 def parse_ints(spec: str) -> list[int]:
     return [int(x) for x in spec.split(",")]
+
+
+def parallel_sweep(args, writer, csv_file, done) -> None:
+    """One sinter.collect over every missing (L, p) point.
+
+    Unlike the serial loop, seed and sec are left blank (worker scheduling is
+    nondeterministic and per-point timing undefined) and shots records what
+    actually ran (--max-errors can stop a point early).
+    """
+    circuits, codes = {}, {}
+    for L in args.Ls:
+        code = paper_code(args.tile, L, L)
+        rounds = args.rounds or L
+        codes[L] = (code, rounds)
+        for p in args.ps:
+            if (L, p) in done:
+                print(f"skip  L={L} p={p}")
+                continue
+            if args.noise == "circuit":
+                circuits[(L, p)] = memory_z_circuit(code, rounds, p)
+            else:                              # si1000
+                circuits[(L, p)] = NoiseModel.SI1000(p).noisy_circuit(
+                    memory_z_base(code, rounds))
+    if not circuits:
+        return
+    stats = collect(circuits, args.decoder, max_shots=args.shots,
+                    max_errors=args.max_errors, workers=args.workers)
+    for (L, p), (shots, fails) in sorted(stats.items()):
+        code, rounds = codes[L]
+        writer.writerow(dict(
+            tile=args.tile, decoder=args.decoder, noise=args.noise,
+            rounds=rounds, L=L, n=code.n, k=code.k, p=p, meas_error="",
+            seed="", shots=shots, fails=fails, rate=fails / shots, sec=""))
+        csv_file.flush()
+        print(f"done  L={L} p={p} rate={fails / shots:.4f} ({shots} shots)")
 
 
 def already_done(path: str) -> set[tuple]:
@@ -77,23 +114,46 @@ def main():
                     help="pheno only: syndrome-bit flip probability; "
                          "default: same as p")
     ap.add_argument("--shots", type=int, default=2000)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="serial runs only; default 0")
+    ap.add_argument("--workers", type=int, nargs="?", const=-1, default=None,
+                    help="circuit/si1000: parallel collection via sinter; "
+                         "bare --workers uses QEC_TILE_WORKERS from .env")
+    ap.add_argument("--max-errors", type=int, default=None,
+                    help="stop a point after this many errors (needs --workers)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if args.noise != "pheno" and args.meas_error is not None:
         ap.error("--meas-error only applies to --noise pheno")
+    if args.workers is not None and args.noise not in ("circuit", "si1000"):
+        ap.error("--workers only applies to --noise circuit/si1000")
+    if args.workers == -1:                     # bare --workers: the allocation
+        args.workers = config.workers()
+    if args.workers is not None and args.workers <= 0:
+        ap.error("--workers must be a positive integer")
+    if args.max_errors is not None and args.workers is None:
+        ap.error("--max-errors requires --workers")
+    if args.workers is not None and args.seed is not None:
+        ap.error("--seed has no effect with --workers "
+                 "(sinter's scheduling is nondeterministic)")
+    if args.seed is None:
+        args.seed = 0                          # serial default
 
     if args.out is None:
         args.out = (f"data/{args.tile}_{args.decoder}_{args.noise}"
                     f"_shots{args.shots}_seed{args.seed}.csv")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     done = already_done(args.out)
-    is_new = not os.path.exists(args.out)
+    is_new = (not os.path.exists(args.out)
+              or os.path.getsize(args.out) == 0)   # a killed run's leftover
 
     with open(args.out, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         if is_new:
             writer.writeheader()
+        if args.workers is not None:
+            parallel_sweep(args, writer, f, done)
+            return
         for L in args.Ls:
             code = paper_code(args.tile, L, L)
             rounds = 1 if args.noise == "capacity" else (args.rounds or L)
