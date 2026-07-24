@@ -13,23 +13,28 @@ from __future__ import annotations
 import sinter
 import stim
 from ldpc import SinterBpOsdDecoder
+# ldpc names the LSD adapter without "Bp", but it still runs BP first.
+from ldpc.sinter_decoders import SinterLsdDecoder
 
 
-def _bposd() -> SinterBpOsdDecoder:
+def _osd(osd_method: str, osd_order: int):
     # Mirror decode.make_decoder so serial and parallel results are comparable.
-    return SinterBpOsdDecoder(
-        bp_method="minimum_sum",
-        max_iter=50,
-        osd_method="osd_cs",
-        osd_order=7,
-    )
+    return lambda: SinterBpOsdDecoder(
+        bp_method="minimum_sum", max_iter=50, ms_scaling_factor=1.0,
+        osd_method=osd_method, osd_order=osd_order)
 
 
-# A future NN decoder registers a sinter.Decoder factory here, next to its
-# entry in decode.DECODERS.  Factories, not instances: sinter pickles the
-# decoder into each worker, and a fresh object per collect() avoids any
-# shared state between runs.
-SINTER_DECODERS = {"bposd": _bposd}
+# Factories, not instances: sinter pickles the decoder into each worker, and a
+# fresh object per collect() avoids shared state between runs.  These mirror
+# decode.DECODERS, except bplsd_cs7 is absent — SinterLsdDecoder has no
+# lsd_method knob, so the combination-sweep LSD stays serial-only.
+SINTER_DECODERS = {
+    "bposd_cs7": _osd("osd_cs", 7),
+    "bposd_0": _osd("osd_0", 0),
+    "bplsd_0": lambda: SinterLsdDecoder(          # Hillmann et al. setting
+        bp_method="minimum_sum", max_iter=30,
+        ms_scaling_factor=0.625, lsd_order=0),
+}
 
 
 def collect(circuits: dict[object, stim.Circuit], decoder: str,

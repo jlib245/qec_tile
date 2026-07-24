@@ -15,10 +15,19 @@ failure test is exactly the one pinned down in tests/test_logicals.py.
 from __future__ import annotations
 
 import numpy as np
-from ldpc import BpOsdDecoder
+from ldpc import BpLsdDecoder, BpOsdDecoder
 
 
-def make_decoder(H: np.ndarray, channel, *, max_iter: int = 50,
+def _prior(channel):
+    """error_rate for a scalar rate, error_channel for a per-column vector."""
+    channel = np.asarray(channel, dtype=float)
+    return (dict(error_rate=float(channel)) if channel.ndim == 0
+            else dict(error_channel=list(channel)))
+
+
+def make_decoder(H: np.ndarray, channel, *, bp_method: str = "minimum_sum",
+                 max_iter: int = 50, ms_scaling_factor: float = 1.0,
+                 osd_method: str = "osd_cs",
                  osd_order: int = 7) -> BpOsdDecoder:
     """A BP+OSD decoder for parity checks ``H`` with prior ``channel``.
 
@@ -26,23 +35,57 @@ def make_decoder(H: np.ndarray, channel, *, max_iter: int = 50,
     true rates for its posteriors, and OSD ranks bits by exactly those
     posteriors.  A scalar means one uniform rate; a vector gives a per-column
     prior (space-time matrices mix data and measurement rates).
+
+    The BP/OSD knobs are exposed so the registry can pin each decoder to its
+    reference setting; ldpc's own defaults are weak (e.g. max_iter=3).
     """
-    channel = np.asarray(channel, dtype=float)
-    prior = (dict(error_rate=float(channel)) if channel.ndim == 0
-             else dict(error_channel=list(channel)))
     return BpOsdDecoder(
         H.astype(np.uint8),
-        **prior,
-        bp_method="minimum_sum",   # ldpc's default; scaling left at its default
+        **_prior(channel),
+        bp_method=bp_method,
         max_iter=max_iter,
-        osd_method="osd_cs",       # combination sweep
+        ms_scaling_factor=ms_scaling_factor,
+        osd_method=osd_method,
         osd_order=osd_order,
     )
 
 
-# Decoder registry.  A future NN decoder registers its own builder here; there
-# is deliberately no default, so every run records which decoder produced it.
-DECODERS = {"bposd": make_decoder}
+def make_lsd_decoder(H: np.ndarray, channel, *, bp_method: str = "minimum_sum",
+                     max_iter: int = 30, ms_scaling_factor: float = 0.625,
+                     lsd_method: str = "lsd_0",
+                     lsd_order: int = 0) -> BpLsdDecoder:
+    """A BP+LSD decoder (Hillmann et al., arXiv:2406.18655).
+
+    Defaults are that paper's setting: min-sum, 30 iterations, scaling
+    alpha=0.625, LSD order 0.  ldpc's own defaults are far weaker (max_iter=3,
+    product_sum), so they are pinned here.
+    """
+    return BpLsdDecoder(
+        H.astype(np.uint8),
+        **_prior(channel),
+        bp_method=bp_method,
+        max_iter=max_iter,
+        ms_scaling_factor=ms_scaling_factor,
+        lsd_method=lsd_method,
+        lsd_order=lsd_order,
+    )
+
+
+# Decoder registry: name -> (H, channel) -> decoder, each pinned to its
+# reference setting so the CSV/filename decoder axis is self-describing.
+DECODERS = {
+    # BB-code convention (Bravyi et al.): OSD combination sweep, order 7.
+    "bposd_cs7": lambda H, ch: make_decoder(H, ch, osd_method="osd_cs",
+                                            osd_order=7),
+    # Cheapest OSD: plain order-0 elimination, no combination sweep.
+    "bposd_0": lambda H, ch: make_decoder(H, ch, osd_method="osd_0",
+                                          osd_order=0),
+    # LSD paper setting (Hillmann et al.): order 0, min-sum, 30 iters, a=0.625.
+    "bplsd_0": lambda H, ch: make_lsd_decoder(H, ch),
+    # LSD with the BB-style high-order sweep, for comparison.
+    "bplsd_cs7": lambda H, ch: make_lsd_decoder(H, ch, lsd_method="lsd_cs",
+                                                lsd_order=7),
+}
 
 
 def sample_residuals(code, p: float, shots: int, decoder: str,

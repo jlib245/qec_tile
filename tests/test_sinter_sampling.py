@@ -12,7 +12,7 @@ def test_collect_returns_stats_for_every_circuit():
     code = paper_code(*SMALL)
     circuits = {("L2", 0.02): memory_z_circuit(code, 2, 0.02),
                 ("L2", 0.05): memory_z_circuit(code, 2, 0.05)}
-    stats = collect(circuits, decoder="bposd", max_shots=50, workers=2)
+    stats = collect(circuits, decoder="bposd_cs7", max_shots=50, workers=2)
     assert set(stats) == set(circuits)
     for shots, errors in stats.values():
         assert 0 < shots <= 50
@@ -21,7 +21,7 @@ def test_collect_returns_stats_for_every_circuit():
 
 def test_zero_noise_gives_zero_errors():
     code = paper_code(*SMALL)
-    stats = collect({"clean": memory_z_base(code, 2)}, decoder="bposd",
+    stats = collect({"clean": memory_z_base(code, 2)}, decoder="bposd_cs7",
                     max_shots=30, workers=2)
     assert stats["clean"][1] == 0
 
@@ -31,11 +31,18 @@ def test_unknown_decoder_is_rejected():
         collect({}, decoder="nn", max_shots=10)
 
 
+def test_registry_mirrors_serial_except_lsd_cs():
+    """SinterLsdDecoder has no lsd_method knob, so bplsd_cs7 is serial-only."""
+    from qec_tile.decode import DECODERS
+    from qec_tile.sinter_sampling import SINTER_DECODERS
+    assert set(SINTER_DECODERS) == set(DECODERS) - {"bplsd_cs7"}
+
+
 def test_max_errors_stops_early():
     """p=0.05 at rounds=2 fails ~30% of shots, so 5 errors arrive fast."""
     code = paper_code(*SMALL)
     noisy = memory_z_circuit(code, 2, 0.05)
-    stats = collect({"x": noisy}, decoder="bposd",
+    stats = collect({"x": noisy}, decoder="bposd_cs7",
                     max_shots=10_000, max_errors=5, workers=2)
     shots, errors = stats["x"]
     assert errors >= 5

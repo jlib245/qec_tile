@@ -71,7 +71,7 @@ def test_zero_noise_circuit_never_fails():
     """No noise -> no error mechanisms in the DEM -> nothing can fail."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=2, p=0.0)
-    assert circuit_failure_rate(circuit, shots=20, decoder="bposd",
+    assert circuit_failure_rate(circuit, shots=20, decoder="bposd_cs7",
                                 seed=0) == 0.0
 
 
@@ -79,8 +79,8 @@ def test_circuit_rate_is_deterministic_given_a_seed():
     """Same stim sampler seed and decoder -> identical outcome."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=2, p=0.01)
-    a = circuit_failure_rate(circuit, shots=50, decoder="bposd", seed=3)
-    b = circuit_failure_rate(circuit, shots=50, decoder="bposd", seed=3)
+    a = circuit_failure_rate(circuit, shots=50, decoder="bposd_cs7", seed=3)
+    b = circuit_failure_rate(circuit, shots=50, decoder="bposd_cs7", seed=3)
     assert a == b
 
 
@@ -88,9 +88,9 @@ def test_circuit_rate_grows_with_p():
     """Wiring smoke test.  Measured: 0.007 vs 0.94 — a >100x margin."""
     code = paper_code(*SMALL)
     low = circuit_failure_rate(memory_z_circuit(code, rounds=2, p=0.002),
-                               shots=150, decoder="bposd", seed=1)
+                               shots=150, decoder="bposd_cs7", seed=1)
     high = circuit_failure_rate(memory_z_circuit(code, rounds=2, p=0.03),
-                                shots=150, decoder="bposd", seed=1)
+                                shots=150, decoder="bposd_cs7", seed=1)
     assert low < high
 
 
