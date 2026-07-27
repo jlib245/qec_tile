@@ -8,6 +8,10 @@ from .circuit import circuit_failure_rate, memory_z_base, memory_z_circuit
 from .noise_model import NoiseModel
 from .decode import (DECODERS, failure_rate, logical_error_rate, make_decoder,
                      sample_residuals)
+from .directional import (PAPER_CODES, build_directional_code,
+                          displacement_vectors, parse_directional_word,
+                          satisfies_parity_condition, tile_from_word,
+                          walk_edges)
 from .distance import (distance_bruteforce, distance_ilp,
                        distance_upper_bound)
 from .pheno import spacetime_channel, spacetime_matrices
@@ -20,4 +24,6 @@ __all__ = ["add", "parity", "config", "TILES", "TileCode", "build_tile_code",
            "logical_error_rate", "make_decoder", "memory_z_base",
            "memory_z_circuit", "NoiseModel", "sample_residuals",
            "SINTER_DECODERS", "collect", "spacetime_channel",
-           "spacetime_matrices"]
+           "spacetime_matrices", "PAPER_CODES", "build_directional_code",
+           "displacement_vectors", "parse_directional_word",
+           "satisfies_parity_condition", "tile_from_word", "walk_edges"]
