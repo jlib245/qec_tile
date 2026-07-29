@@ -4,6 +4,7 @@
 from . import config  # noqa: F401  isort:skip
 
 from ._core import add, parity
+from .bp import BpIteration, min_sum, min_sum_trace
 from .circuit import circuit_failure_rate, memory_z_base, memory_z_circuit
 from .noise_model import NoiseModel
 from .decode import (DECODERS, failure_rate, logical_error_rate, make_decoder,
@@ -18,7 +19,8 @@ from .pheno import spacetime_channel, spacetime_matrices
 from .sinter_sampling import SINTER_DECODERS, collect
 from .tile import TILES, TileCode, build_tile_code, paper_code
 
-__all__ = ["add", "parity", "config", "TILES", "TileCode", "build_tile_code",
+__all__ = ["add", "parity", "config", "BpIteration", "min_sum",
+           "min_sum_trace", "TILES", "TileCode", "build_tile_code",
            "paper_code", "circuit_failure_rate", "distance_bruteforce",
            "distance_ilp", "distance_upper_bound", "DECODERS", "failure_rate",
            "logical_error_rate", "make_decoder", "memory_z_base",
