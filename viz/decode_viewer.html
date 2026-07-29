@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tile code decoding</title>
+<style>
+:root{
+  --bg:#fff; --surface-1:#f6f7f9; --surface-2:#eceef2;
+  --text:#1b1d21; --text-secondary:#5a606b; --text-muted:#8b919c;
+  --border:rgba(0,0,0,.12);
+  --idle:#c3c8d0; --error:#e0393e; --correction:#2a78d6;
+  --residual:#8b46d6; --lit:#eb6834; --ok:#1f9d55;
+  --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#16181c; --surface-1:#1e2126; --surface-2:#272b32;
+    --text:#e6e8ec; --text-secondary:#a2a9b5; --text-muted:#767d89;
+    --border:rgba(255,255,255,.12);
+    --idle:#3d434c; --error:#f4595e; --correction:#5a9df0;
+    --residual:#a97ae8; --lit:#f2854f; --ok:#3ec27a;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:var(--bg);color:var(--text);
+     font-family:var(--font);font-size:14px;line-height:1.5}
+main{max-width:1180px;margin:0 auto}
+h1{font-size:17px;font-weight:600;margin:0 0 4px}
+.sub{color:var(--text-secondary);font-size:13px;margin:0 0 16px}
+.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:0 0 14px}
+select,button{font:inherit;color:var(--text);background:var(--surface-2);
+  border:1px solid var(--border);border-radius:6px;padding:5px 8px}
+button{cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+label{font-size:13px;color:var(--text-secondary)}
+.val{font-family:var(--font-mono);font-size:13px}
+.split{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+#pane{background:var(--surface-1);border-radius:12px;padding:12px;flex:1 1 620px}
+canvas{display:block;cursor:crosshair;max-width:100%}
+aside{flex:1 1 260px;min-width:240px}
+.rows{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;
+      font-family:var(--font-mono);font-size:13px}
+.rows .k{color:var(--text-secondary)}
+.verdict{margin:12px 0 0;padding:10px 12px;border-radius:8px;
+         background:var(--surface-2);font-weight:500}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0;
+        font-size:12px;color:var(--text-secondary)}
+.legend span.item{display:flex;align-items:center;gap:6px}
+.swatch{width:14px;height:5px;border-radius:3px}
+.dot{width:9px;height:9px;border-radius:50%}
+#status{font-size:12.5px;color:var(--text-muted);margin:10px 0 0;min-height:18px}
+</style>
+</head>
+<body>
+<main>
+<h1>Error → syndrome → decoding</h1>
+<p class="sub">Click an edge to put an X error on that qubit. The syndrome and the
+decoding are computed by the running Python process, with the same BP+OSD the
+benchmarks use.</p>
+
+<div class="controls">
+  <select id="code" aria-label="code"></select>
+  <label for="p">p</label>
+  <input type="range" id="p" min="0.005" max="0.2" step="0.005" value="0.05" style="width:130px">
+  <span class="val" id="pOut">0.050</span>
+  <select id="decoder" aria-label="decoder"></select>
+  <button id="sample" type="button">Random shot</button>
+  <button id="clear" type="button">Clear</button>
+  <label><input type="checkbox" id="showChecks"> show X-checks</label>
+</div>
+
+<div class="split">
+  <div id="pane"><canvas id="cv" role="img" aria-label="code lattice"></canvas>
+    <div class="legend">
+      <span class="item"><span class="swatch" style="background:var(--idle)"></span>qubit</span>
+      <span class="item"><span class="swatch" style="background:var(--error)"></span>error e</span>
+      <span class="item"><span class="swatch" style="background:var(--correction)"></span>correction ê</span>
+      <span class="item"><span class="swatch" style="background:var(--residual)"></span>residual e⊕ê</span>
+      <span class="item"><span class="dot" style="background:var(--lit)"></span>lit Z-check</span>
+      <span class="item"><span class="dot" style="background:var(--idle)"></span>quiet Z-check</span>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <aside>
+    <div class="rows" id="numbers"></div>
+    <div class="verdict" id="verdict">click a qubit to start</div>
+    <div class="legend" style="margin-top:14px">
+      <span>Z-checks read X errors, so those are the ones that light up.
+      A residual that is a stabilizer is harmless; one that flips a logical is a failure.</span>
+    </div>
+  </aside>
+</div>
+</main>
+
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const codeSelect = document.getElementById('code');
+const decoderSelect = document.getElementById('decoder');
+const pSlider = document.getElementById('p'), pOut = document.getElementById('pOut');
+const showChecks = document.getElementById('showChecks');
+const statusLine = document.getElementById('status');
+
+let geom = null;          // /api/geometry payload
+let errorSet = new Set(); // qubit indices carrying an X error
+let shot = null;          // /api/decode payload
+let view = null;          // {scale, ox, oy}
+let pending = 0;
+
+const say = text => { statusLine.textContent = text; };
+
+async function boot() {
+  const meta = await (await fetch('/api/codes')).json();
+  meta.codes.forEach(code => {
+    const option = document.createElement('option');
+    option.value = code.id;
+    option.textContent = code.label + '  [[' + code.n + ',' + code.k + ']]';
+    codeSelect.appendChild(option);
+  });
+  meta.decoders.forEach(name => {
+    const option = document.createElement('option');
+    option.value = option.textContent = name;
+    if (name === 'bposd_cs7') option.selected = true;
+    decoderSelect.appendChild(option);
+  });
+  await loadCode(meta.codes[0].id);
+}
+
+async function loadCode(codeId) {
+  say('building ' + codeId + ' …');
+  geom = await (await fetch('/api/geometry/' + encodeURIComponent(codeId))).json();
+  errorSet = new Set();
+  shot = null;
+  say('');
+  draw();
+  report();
+}
+
+// Lattice units -> pixels, fitted to the pane with room for the outermost edges.
+function fit() {
+  const xs = geom.qubits.map(q => q.mx), ys = geom.qubits.map(q => q.my);
+  const minX = Math.min(...xs) - 0.6, maxX = Math.max(...xs) + 0.6;
+  const minY = Math.min(...ys) - 0.6, maxY = Math.max(...ys) + 0.6;
+  const wide = Math.min(720, Math.max(320, cv.parentElement.clientWidth - 24));
+  const scale = Math.min(wide / (maxX - minX), 620 / (maxY - minY));
+  return {scale, ox: -minX * scale, oy: -minY * scale,
+          width: (maxX - minX) * scale, height: (maxY - minY) * scale, maxY};
+}
+
+// y grows upward on the lattice and downward on a canvas.
+const toX = (x, v) => v.ox + x * v.scale;
+const toY = (y, v) => v.height - (v.oy + y * v.scale);
+
+function draw() {
+  if (!geom) return;
+  view = fit();
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = view.width * dpr; cv.height = view.height * dpr;
+  cv.style.width = view.width + 'px'; cv.style.height = view.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, view.width, view.height);
+
+  const css = getComputedStyle(document.documentElement);
+  const colour = name => css.getPropertyValue(name).trim();
+  const correction = new Set(shot ? shot.correction : []);
+  const residual = new Set(shot ? shot.residual : []);
+  const lit = new Set(shot ? shot.syndrome : []);
+
+  const half = 0.42 * view.scale;
+  const thickness = Math.max(3, Math.min(9, view.scale * 0.16));
+
+  geom.qubits.forEach((qubit, index) => {
+    const cx = toX(qubit.mx, view), cy = toY(qubit.my, view);
+    const horizontal = qubit.orient === 'H';
+    const inError = errorSet.has(index);
+    const inResidual = residual.has(index);
+    const inCorrection = correction.has(index);
+
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = inResidual ? colour('--residual')
+                    : inError ? colour('--error')
+                    : inCorrection ? colour('--correction')
+                    : colour('--idle');
+    ctx.lineWidth = (inError || inResidual || inCorrection) ? thickness : thickness * 0.6;
+    ctx.beginPath();
+    if (horizontal) { ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); }
+    else { ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half); }
+    ctx.stroke();
+
+    // A correction that did not land on the error itself is worth seeing even
+    // when the qubit is drawn in another colour.
+    if (inCorrection && !inResidual) {
+      ctx.strokeStyle = colour('--correction');
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, thickness * 0.9, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+  });
+
+  const radius = Math.max(2.5, view.scale * 0.09);
+  geom.z_centres.forEach((centre, index) => {
+    ctx.fillStyle = lit.has(index) ? colour('--lit') : colour('--idle');
+    ctx.beginPath();
+    ctx.arc(toX(centre[0], view), toY(centre[1], view), radius, 0, 2 * Math.PI);
+    ctx.fill();
+  });
+  if (showChecks.checked) {
+    ctx.strokeStyle = colour('--text-muted');
+    ctx.lineWidth = 1;
+    geom.x_centres.forEach(centre => {
+      const x = toX(centre[0], view), y = toY(centre[1], view);
+      ctx.beginPath();
+      ctx.rect(x - radius, y - radius, 2 * radius, 2 * radius);
+      ctx.stroke();
+    });
+  }
+}
+
+function nearestQubit(event) {
+  const box = cv.getBoundingClientRect();
+  const x = event.clientX - box.left, y = event.clientY - box.top;
+  let best = -1, bestDistance = Infinity;
+  geom.qubits.forEach((qubit, index) => {
+    const dx = toX(qubit.mx, view) - x, dy = toY(qubit.my, view) - y;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) { bestDistance = distance; best = index; }
+  });
+  return bestDistance <= (0.45 * view.scale) ** 2 ? best : -1;
+}
+
+async function decode() {
+  const token = ++pending;
+  if (!errorSet.size) { shot = null; draw(); report(); return; }
+  say('decoding …');
+  const response = await fetch('/api/decode', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: geom.id, error: [...errorSet],
+                          p: +pSlider.value, decoder: decoderSelect.value})
+  });
+  if (token !== pending) return;          // a newer click already superseded this
+  shot = await response.json();
+  say('');
+  draw();
+  report();
+}
+
+function report() {
+  const row = (key, value) =>
+    '<div class="k">' + key + '</div><div>' + value + '</div>';
+  const weight = list => list ? list.length : 0;
+  document.getElementById('numbers').innerHTML =
+    row('n', geom.n) + row('k', geom.k) +
+    row('error wt', errorSet.size) +
+    row('syndrome wt', weight(shot && shot.syndrome)) +
+    row('correction wt', weight(shot && shot.correction)) +
+    row('residual wt', weight(shot && shot.residual));
+
+  const verdict = document.getElementById('verdict');
+  if (!shot) {
+    verdict.textContent = errorSet.size ? 'decoding …' : 'click a qubit to start';
+    verdict.style.color = '';
+    return;
+  }
+  const css = getComputedStyle(document.documentElement);
+  if (shot.failure) {
+    verdict.innerHTML = 'logical failure — residual flips L_Z ' +
+      shot.logicals_flipped.join(', ');
+    verdict.style.color = css.getPropertyValue('--error').trim();
+  } else if (shot.residual.length) {
+    verdict.innerHTML = 'corrected — residual is a stabilizer (weight ' +
+      shot.residual.length + ')';
+    verdict.style.color = css.getPropertyValue('--ok').trim();
+  } else {
+    verdict.textContent = 'corrected exactly — residual is empty';
+    verdict.style.color = css.getPropertyValue('--ok').trim();
+  }
+}
+
+cv.addEventListener('click', event => {
+  const qubit = nearestQubit(event);
+  if (qubit < 0) return;
+  if (errorSet.has(qubit)) errorSet.delete(qubit); else errorSet.add(qubit);
+  draw();
+  decode();
+});
+codeSelect.addEventListener('change', () => loadCode(codeSelect.value));
+decoderSelect.addEventListener('change', decode);
+pSlider.addEventListener('input', () => {
+  pOut.textContent = (+pSlider.value).toFixed(3);
+});
+pSlider.addEventListener('change', decode);
+showChecks.addEventListener('change', draw);
+document.getElementById('clear').addEventListener('click', () => {
+  errorSet = new Set(); shot = null; draw(); report();
+});
+document.getElementById('sample').addEventListener('click', async () => {
+  say('sampling …');
+  const response = await fetch('/api/sample', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: geom.id, p: +pSlider.value})
+  });
+  errorSet = new Set((await response.json()).error);
+  draw();
+  decode();
+});
+window.addEventListener('resize', draw);
+
+boot();
+</script>
+</body>
+</html>
