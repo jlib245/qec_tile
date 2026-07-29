@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from ldpc import BpDecoder
 
-from qec_tile.bp import METHODS, bp, bp_trace
+from qec_tile.bp import METHODS, bp, bp_trace, tanner_edges
 from qec_tile.tile import paper_code
 
 P = 0.05
@@ -88,6 +88,71 @@ def test_channel_accepts_a_vector(method):
     assert len(flat) == len(scalar)
     for from_vector, from_scalar in zip(flat, scalar):
         assert np.allclose(from_vector.llr, from_scalar.llr)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_messages_have_one_entry_per_edge(method):
+    """Messages live on Tanner edges, in the order tanner_edges reports."""
+    code = paper_code("b3w6", 3, 3)
+    rows, cols = tanner_edges(code.HZ)
+    assert rows.size == int(code.HZ.sum())
+    for step in bp_trace(code.HZ, syndrome_of(code, [4, 20]), P,
+                         method=method, max_iter=3):
+        assert step.to_check.shape == rows.shape
+        assert step.to_bit.shape == rows.shape
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_first_sweep_sends_the_prior(method):
+    """A v-node has heard nothing yet, so its first message is its prior."""
+    code = paper_code("b3w6", 3, 3)
+    _rows, cols = tanner_edges(code.HZ)
+    first = next(iter(bp_trace(code.HZ, syndrome_of(code, [4, 20]), P,
+                               method=method, max_iter=3)))
+    assert np.allclose(first.to_check, np.log((1 - P) / P))
+    assert first.to_check.shape == cols.shape
+
+
+def test_check_message_is_the_min_over_the_others():
+    """The min-sum rule, recomputed here the slow and obvious way.
+
+    Excluding the edge's own message is the whole point: a c-node must not
+    tell a v-node what that v-node just told it.
+    """
+    code = paper_code("b3w6", 3, 3)
+    syndrome = syndrome_of(code, [4, 20])
+    rows, _cols = tanner_edges(code.HZ)
+    step = list(bp_trace(code.HZ, syndrome, P, method="minimum_sum",
+                         max_iter=3))[-1]
+    for edge in range(rows.size):
+        others = [other for other in range(rows.size)
+                  if rows[other] == rows[edge] and other != edge]
+        magnitude = min(abs(step.to_check[other]) for other in others)
+        sign = np.prod([np.sign(step.to_check[other]) for other in others])
+        flip = -1 if syndrome[rows[edge]] else 1
+        assert np.isclose(step.to_bit[edge], flip * sign * magnitude), edge
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_posterior_is_the_prior_plus_what_came_in(method):
+    code = paper_code("b3w6", 3, 3)
+    _rows, cols = tanner_edges(code.HZ)
+    for step in bp_trace(code.HZ, syndrome_of(code, [4, 20]), P,
+                         method=method, max_iter=3):
+        incoming = np.bincount(cols, weights=step.to_bit, minlength=code.n)
+        assert np.allclose(step.llr, np.log((1 - P) / P) + incoming)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_next_sweep_subtracts_the_message_it_answered(method):
+    """v -> c for the next sweep is the posterior minus that edge's own reply,
+    which is what keeps a belief from being counted twice."""
+    code = paper_code("b3w6", 3, 3)
+    _rows, cols = tanner_edges(code.HZ)
+    steps = list(bp_trace(code.HZ, syndrome_of(code, [4, 20]), P,
+                          method=method, max_iter=4))
+    for earlier, later in zip(steps, steps[1:]):
+        assert np.allclose(later.to_check, earlier.llr[cols] - earlier.to_bit)
 
 
 def test_unknown_method_is_rejected():

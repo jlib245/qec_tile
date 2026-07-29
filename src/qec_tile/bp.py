@@ -44,11 +44,28 @@ class BpIteration:
     ``llr`` is the posterior after this iteration, ``hard`` its sign as a 0/1
     vector, and ``converged`` says whether ``hard`` already explains the
     syndrome — in which case the trace ends here, as ldpc's own loop does.
+
+    ``to_check`` and ``to_bit`` are the two halves of the sweep, one entry per
+    Tanner edge in ``tanner_edges`` order: what the v-nodes sent and what the
+    c-nodes answered.  Together they are the message passing itself, which the
+    posterior only summarises.
     """
     iteration: int
     llr: np.ndarray
     hard: np.ndarray
     converged: bool
+    to_check: np.ndarray
+    to_bit: np.ndarray
+
+
+def tanner_edges(H: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(rows, cols)``: the check and qubit each Tanner edge joins.
+
+    This is the order every message array uses.  ``np.nonzero`` walks
+    row-major, so a check's edges are contiguous, which is what the per-check
+    reductions in ``bp_trace`` rely on.
+    """
+    return np.nonzero(np.ascontiguousarray(H, dtype=np.uint8))
 
 
 def _prior_llr(channel, n: int) -> np.ndarray:
@@ -83,13 +100,11 @@ def bp_trace(H: np.ndarray, syndrome: np.ndarray, channel,
     syndrome = np.asarray(syndrome, dtype=np.uint8).reshape(n_checks)
     prior = _prior_llr(channel, n)
 
-    # One entry per Tanner-graph edge.  np.nonzero walks row-major, so the
-    # edges of a check are already contiguous, which is what the per-check
-    # reductions below rely on.
-    rows, cols = np.nonzero(H)
+    rows, cols = tanner_edges(H)
     if rows.size == 0:                       # no checks: nothing to propagate
-        hard = np.zeros(n, dtype=np.uint8)
-        yield BpIteration(1, prior.copy(), hard, not syndrome.any())
+        empty = np.zeros(0)
+        yield BpIteration(1, prior.copy(), np.zeros(n, dtype=np.uint8),
+                          not syndrome.any(), empty, empty)
         return
 
     degree = np.bincount(rows, minlength=n_checks)
@@ -140,7 +155,8 @@ def bp_trace(H: np.ndarray, syndrome: np.ndarray, channel,
         llr = prior + np.bincount(cols, weights=message_to_bit, minlength=n)
         hard = (llr < 0).astype(np.uint8)
         converged = np.array_equal((H @ hard) % 2, syndrome)
-        yield BpIteration(iteration, llr, hard, bool(converged))
+        yield BpIteration(iteration, llr, hard, bool(converged),
+                          message_to_check.copy(), message_to_bit)
         if converged:
             return
 
