@@ -37,6 +37,24 @@ from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile import config
 from qec_tile.sinter_sampling import collect
 from qec_tile.tile import paper_code
+from qec_tile.directional import build_directional_code
+
+
+def iter_codes(args):
+    """Yield (label, code, rounds) for each size to sweep.
+
+    Tile mode walks --Ls (label is str(L)); directional mode walks --sizes
+    (label is "MxN").  Labels are strings so the CSV 'L' column and the resume
+    key stay one type across both.
+    """
+    if args.word:                                    # directional
+        for M, N in args.sizes:
+            code = build_directional_code(args.word, M, N)
+            yield f"{M}x{N}", code, (args.rounds or max(M, N))
+    else:                                            # original tile
+        for L in args.Ls:
+            code = paper_code(args.tile, L, L)
+            yield str(L), code, (args.rounds or L)
 
 FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
           "meas_error", "seed", "shots", "fails", "rate", "sec"]
@@ -56,6 +74,15 @@ def parse_ints(spec: str) -> list[int]:
     return [int(x) for x in spec.split(",")]
 
 
+def parse_sizes(spec: str) -> list[tuple[int, int]]:
+    """"4x4,8x8" -> [(4, 4), (8, 8)]."""
+    sizes = []
+    for token in spec.split(","):
+        m, n = token.lower().split("x")
+        sizes.append((int(m), int(n)))
+    return sizes
+
+
 def parallel_sweep(args, writer, csv_file, done) -> None:
     """One sinter.collect over every missing (L, p) point.
 
@@ -64,39 +91,41 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
     actually ran (--max-errors can stop a point early).
     """
     circuits, codes = {}, {}
-    for L in args.Ls:
-        code = paper_code(args.tile, L, L)
-        rounds = args.rounds or L
-        codes[L] = (code, rounds)
+    for label, code, rounds in iter_codes(args):
+        codes[label] = (code, rounds)
         for p in args.ps:
-            if (L, p) in done:
-                print(f"skip  L={L} p={p}")
+            if (label, p) in done:
+                print(f"skip  L={label} p={p}")
                 continue
             if args.noise == "circuit":
-                circuits[(L, p)] = memory_z_circuit(code, rounds, p)
+                circuits[(label, p)] = memory_z_circuit(code, rounds, p)
             else:                              # si1000
-                circuits[(L, p)] = NoiseModel.SI1000(p).noisy_circuit(
+                circuits[(label, p)] = NoiseModel.SI1000(p).noisy_circuit(
                     memory_z_base(code, rounds))
     if not circuits:
         return
     stats = collect(circuits, args.decoder, max_shots=args.shots,
                     max_errors=args.max_errors, workers=args.workers)
-    for (L, p), (shots, fails) in sorted(stats.items()):
-        code, rounds = codes[L]
+    for (label, p), (shots, fails) in sorted(stats.items()):
+        code, rounds = codes[label]
         writer.writerow(dict(
-            tile=args.tile, decoder=args.decoder, noise=args.noise,
-            rounds=rounds, L=L, n=code.n, k=code.k, p=p, meas_error="",
-            seed="", shots=shots, fails=fails, rate=fails / shots, sec=""))
+            tile=(args.word or args.tile), decoder=args.decoder,
+            noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
+            p=p, meas_error="", seed="", shots=shots, fails=fails,
+            rate=fails / shots, sec=""))
         csv_file.flush()
-        print(f"done  L={L} p={p} rate={fails / shots:.4f} ({shots} shots)")
+        print(f"done  L={label} p={p} rate={fails / shots:.4f} ({shots} shots)")
 
 
 def already_done(path: str) -> set[tuple]:
-    """Keys (L, p) already present — the filename fixes the rest."""
+    """Keys (label, p) already present — the filename fixes the rest.
+
+    The L column is a size label: str(L) for tiles, "MxN" for directional.
+    """
     if not os.path.exists(path):
         return set()
     with open(path, newline="") as f:
-        return {(int(row["L"]), float(row["p"]))
+        return {(row["L"], float(row["p"]))
                 for row in csv.DictReader(f)}
 
 
@@ -107,6 +136,11 @@ def main():
                     choices=["capacity", "pheno", "circuit", "si1000"])
     ap.add_argument("--tile", default="b3w6")
     ap.add_argument("--Ls", default="4,6,8,10", type=parse_ints)
+    ap.add_argument("--word", default=None,
+                    help="directional compass word (e.g. N2ESEN2); "
+                         "switches to directional mode")
+    ap.add_argument("--sizes", type=parse_sizes,
+                    help="directional MxN sizes, e.g. 4x4,8x8")
     ap.add_argument("--ps", default="0.04:0.10:7", type=parse_floats)
     ap.add_argument("--rounds", type=int, default=None,
                     help="pheno/circuit; default: rounds = L")
@@ -123,6 +157,13 @@ def main():
                     help="stop a point after this many errors (needs --workers)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.word and not args.sizes:
+        ap.error("--word requires --sizes")
+    if args.sizes and not args.word:
+        ap.error("--sizes requires --word")
+    if args.word and args.noise not in ("capacity", "pheno"):
+        ap.error("directional (--word) supports only capacity/pheno noise "
+                 "(no CXSWAP circuit yet)")
     if args.noise != "pheno" and args.meas_error is not None:
         ap.error("--meas-error only applies to --noise pheno")
     if args.workers is not None and args.noise not in ("circuit", "si1000"):
@@ -140,7 +181,8 @@ def main():
         args.seed = 0                          # serial default
 
     if args.out is None:
-        args.out = (f"data/{args.tile}_{args.decoder}_{args.noise}"
+        stem = args.word if args.word else args.tile
+        args.out = (f"data/{stem}_{args.decoder}_{args.noise}"
                     f"_shots{args.shots}_seed{args.seed}.csv")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     done = already_done(args.out)
@@ -154,14 +196,14 @@ def main():
         if args.workers is not None:
             parallel_sweep(args, writer, f, done)
             return
-        for L in args.Ls:
-            code = paper_code(args.tile, L, L)
-            rounds = 1 if args.noise == "capacity" else (args.rounds or L)
+        for label, code, rounds in iter_codes(args):
+            if args.noise == "capacity":
+                rounds = 1
             if args.noise == "pheno":
                 H, L_obs = spacetime_matrices(code, rounds)   # p-independent
             for p in args.ps:
-                if (L, p) in done:
-                    print(f"skip  L={L} p={p}")
+                if (label, p) in done:
+                    print(f"skip  L={label} p={p}")
                     continue
                 start = time.time()
                 if args.noise == "capacity":
@@ -183,15 +225,15 @@ def main():
                             memory_z_base(code, rounds))
                     rate = circuit_failure_rate(circuit, args.shots,
                                                 args.decoder, seed=args.seed)
-                row = dict(tile=args.tile, decoder=args.decoder,
-                           noise=args.noise, rounds=rounds, L=L, n=code.n,
+                row = dict(tile=(args.word or args.tile), decoder=args.decoder,
+                           noise=args.noise, rounds=rounds, L=label, n=code.n,
                            k=code.k, p=p, meas_error=meas_error,
                            seed=args.seed, shots=args.shots,
                            fails=round(rate * args.shots),
                            rate=rate, sec=round(time.time() - start, 1))
                 writer.writerow(row)
                 f.flush()
-                print(f"done  L={L} p={p} rate={rate:.4f} ({row['sec']}s)")
+                print(f"done  L={label} p={p} rate={rate:.4f} ({row['sec']}s)")
 
 
 if __name__ == "__main__":

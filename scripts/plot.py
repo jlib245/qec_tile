@@ -58,16 +58,18 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     # One curve per (decoder, noise, L); carry n along for the legend label.
+    # L is a size label: "4" for tiles, "11x6" for directional codes.
     # Old CSVs predate the noise column and were all code capacity.
     curves: dict[tuple, list] = defaultdict(list)
     for row in load(args.csv):
         key = (row["decoder"], row.get("noise", "capacity"),
-               int(row["L"]), int(row["n"]), int(row["k"]))
+               row["L"], int(row["n"]), int(row["k"]))
         curves[key].append((float(row["p"]), int(row["fails"]),
                             int(row["shots"])))
 
     fig, ax = plt.subplots(figsize=(6, 4.5))
-    for (decoder, noise, L, n, k), points in sorted(curves.items()):
+    for (decoder, noise, L, n, k), points in sorted(
+            curves.items(), key=lambda kv: (kv[0][3], kv[0][2])):
         points.sort()
         ps = [p for p, _, _ in points]
         rates = [fails / shots for _, fails, shots in points]
