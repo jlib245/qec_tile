@@ -41,7 +41,7 @@ label{font-size:13px;color:var(--text-secondary)}
 canvas{display:block;cursor:crosshair;max-width:100%}
 /* The matrix must not be scaled down: the pane scrolls instead, or clicks
    would land on the wrong column. */
-#pcm{max-width:none}
+#pcm,#tanner{max-width:none}
 aside{flex:1 1 260px;min-width:240px}
 .rows{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;
       font-family:var(--font-mono);font-size:13px}
@@ -53,7 +53,8 @@ aside{flex:1 1 260px;min-width:240px}
 .legend span.item{display:flex;align-items:center;gap:6px}
 .swatch{width:14px;height:5px;border-radius:3px}
 .dot{width:9px;height:9px;border-radius:50%}
-#status{font-size:12.5px;color:var(--text-muted);margin:10px 0 0;min-height:18px}
+#status{font-family:var(--font-mono);font-size:12.5px;color:var(--text-secondary);
+        margin:10px 0 0;min-height:56px;line-height:1.7}
 </style>
 </head>
 <body>
@@ -73,6 +74,10 @@ so a stalled run means no correction at all.</p>
   <label for="maxIter">max iter</label>
   <input type="range" id="maxIter" min="1" max="100" step="1" value="50" style="width:110px">
   <span class="val" id="maxIterOut">50</span>
+  <select id="mode" aria-label="what a click does">
+    <option value="syndrome">click edits the syndrome</option>
+    <option value="subgraph">click builds a subgraph</option>
+  </select>
   <button id="sample" type="button">Random shot</button>
   <button id="clear" type="button">Clear</button>
   <label><input type="checkbox" id="showChecks"> show X-checks</label>
@@ -83,6 +88,10 @@ so a stalled run means no correction at all.</p>
   <label for="iter">iteration</label>
   <input type="range" id="iter" min="1" max="1" value="1" disabled style="flex:1;min-width:160px">
   <span class="val" id="iterOut">—</span>
+  <select id="direction" aria-label="message direction">
+    <option value="to_bit">c → v messages</option>
+    <option value="to_check">v → c messages</option>
+  </select>
 </div>
 
 <div class="split">
@@ -98,6 +107,16 @@ so a stalled run means no correction at all.</p>
       <span class="item"><span class="dot" style="border:1.5px solid var(--lit)"></span>BP's guess (P &gt; 0.5)</span>
     </div>
     <div id="status"></div>
+  </div>
+
+  <div id="tannerWrap" style="flex:1 1 100%">
+    <div class="controls" style="margin-top:14px">
+      <strong style="font-size:13px;font-weight:600">Tanner graph</strong>
+      <span id="tannerHint" style="font-size:12px;color:var(--text-muted)"></span>
+    </div>
+    <div id="tannerPane" style="background:var(--surface-1);border-radius:12px;padding:10px;overflow:auto">
+      <canvas id="tanner" role="img" aria-label="Tanner graph of the picked nodes"></canvas>
+    </div>
   </div>
 
   <div id="matrixWrap" style="flex:1 1 100%">
@@ -129,6 +148,9 @@ so a stalled run means no correction at all.</p>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const codeSelect = document.getElementById('code');
 const methodSelect = document.getElementById('method');
+const directionSelect = document.getElementById('direction');
+const modeSelect = document.getElementById('mode');
+const inSubgraphMode = () => modeSelect.value === 'subgraph';
 const maxIter = document.getElementById('maxIter');
 const maxIterOut = document.getElementById('maxIterOut');
 const pSlider = document.getElementById('p'), pOut = document.getElementById('pOut');
@@ -146,6 +168,32 @@ let syndromeSet = new Set();
 let errorSet = new Set();
 let errorKnown = true;
 let bp = null;            // /api/bp_trace payload
+let messages = null;      // the sweep on the slider
+let sweeps = [];          // that sweep and the next, for the unrolled picture
+let pickedEdge = null;    // an edge of the unrolled picture, to explain
+let tannerHits = [];      // its drawn segments, for hit testing
+let hoverNode = null;     // {kind: 'v'|'c', index} — whose edges to draw
+// In subgraph mode a click pins a node here instead of touching the syndrome,
+// so a Tanner subgraph can be assembled and kept on screen.  The c-nodes are
+// chosen freely; the v-nodes on offer are their neighbours, and `dropped`
+// records which of those the user took back out.
+const picked = {c: new Set()};
+const dropped = new Set();
+
+// Every v-node the picked c-nodes touch — the pool a click can add or remove.
+function qubitPool() {
+  const pool = new Set();
+  geom.edges.forEach(([check, qubit]) => {
+    if (picked.c.has(check)) pool.add(qubit);
+  });
+  return pool;
+}
+
+function activeQubits() {
+  const active = new Set();
+  qubitPool().forEach(qubit => { if (!dropped.has(qubit)) active.add(qubit); });
+  return active;
+}
 let view = null;          // {scale, ox, oy}
 let pending = 0;
 
@@ -154,6 +202,7 @@ const frame = () => (bp && bp.trace.length) ? bp.trace[+iterSlider.value - 1] : 
 // Matrix panel — same layout grammar as pcm_viewer: a gutter for row numbers,
 // a ruler for column numbers, grid lines once cells are big enough.
 const pcm = document.getElementById('pcm'), pctx = pcm.getContext('2d');
+const tanner = document.getElementById('tanner'), tctx = tanner.getContext('2d');
 const matrixPane = document.getElementById('matrixPane');
 const cellSlider = document.getElementById('cell'), cellOut = document.getElementById('cellOut');
 const GUTTER = 46, RULER = 22, BLOCK_GAP = 26;
@@ -187,6 +236,24 @@ function placeChecks() {
   const taken = new Set(geom.qubits.map(qubit => qubit.x + ':' + qubit.y));
   geom.z_draw = geom.z_centres.map(([x, y]) =>
     taken.has(x + ':' + y) ? [x + 0.22, y + 0.22] : [x, y]);
+}
+
+// Subgraph mode: c-nodes go in and out freely, v-nodes only within the pool
+// their checks define — a v-node with no picked check has no edge to show.
+function pinNode(node) {
+  if (node.kind === 'c') {
+    if (picked.c.has(node.index)) picked.c.delete(node.index);
+    else picked.c.add(node.index);
+  } else if (qubitPool().has(node.index)) {
+    if (dropped.has(node.index)) dropped.delete(node.index);
+    else dropped.add(node.index);
+  } else {
+    say('v' + node.index + ' is not on any picked check — pick a c-node first');
+    return;
+  }
+  pickedEdge = null;                       // its edges may be gone now
+  draw();
+  sayMessages();
 }
 
 function clearShot() {
@@ -388,6 +455,8 @@ function draw() {
   ctx.globalAlpha = 1;
   }                                        // end drawNodes
 
+  drawEdges();
+  drawTanner();
   drawMatrix();                            // the same state, seen as a matrix
 }
 
@@ -490,6 +559,22 @@ function drawMatrix() {
     pctx.fillRect(GUTTER + column * cell, RULER - 3, Math.max(2, cell), 2);
   });
 
+  // The picked edge is one cell of H_Z, and the edges that fed it are cells of
+  // the same row or column — ring them so the three views agree.
+  const marked = highlights();
+  if (marked) {
+    const ring = (edge, colourName, width) => {
+      const [check, qubit] = geom.edges[edge];
+      pctx.strokeStyle = colour(colourName);
+      pctx.lineWidth = width;
+      pctx.strokeRect(GUTTER + qubit * cell - 1,
+                      matrixView.yZ + check * cell - 1,
+                      cell + 2, cell + 2);
+    };
+    marked.feeds.forEach(edge => ring(edge, '--lit', 1.5));
+    if (marked.self !== null) ring(marked.self, '--text', 2);
+  }
+
   if (matrixHover !== null) {
     pctx.strokeStyle = muted;
     pctx.lineWidth = 1.5;
@@ -544,6 +629,220 @@ function nearestCheck(event) {
           distance: bestDistance};
 }
 
+// The bipartite picture: c-nodes down one column, v-nodes down the other, the
+// edges between them carrying this sweep's messages.  What appears is what the
+// subgraph mode pinned, plus each pinned node's neighbours — the lattice shows
+// where things are, this shows what talks to what.
+function drawTanner() {
+  const active = activeQubits();
+  const checkList = [...picked.c].sort((a, b) => a - b);
+  const qubitList = [...active].sort((a, b) => a - b);
+  const pairs = [];
+  geom.edges.forEach(([check, qubit], edge) => {
+    if (picked.c.has(check) && active.has(qubit)) {
+      pairs.push({edge, check, qubit});
+    }
+  });
+
+  // Four columns, one per half-step.  The message an edge carries names it;
+  // sweep k's v->c is what the *previous* sweep left behind, or the prior on
+  // the first one, so numbering the columns by iteration would lie.
+  const layers = [];
+  if (sweeps[0]) {
+    layers.push({from: 'c', values: sweeps[0].to_check, iteration: sweeps[0].iteration,
+                 label: 'v→c (iter ' + sweeps[0].iteration + ')', direction: 'to_check'});
+    layers.push({from: 'v', values: sweeps[0].to_bit, iteration: sweeps[0].iteration,
+                 label: 'c→v (iter ' + sweeps[0].iteration + ')', direction: 'to_bit'});
+  }
+  if (sweeps[1]) {
+    layers.push({from: 'c', values: sweeps[1].to_check, iteration: sweeps[1].iteration,
+                 label: 'v→c (iter ' + sweeps[1].iteration + ')', direction: 'to_check'});
+    layers.push({from: 'v', values: sweeps[1].to_bit, iteration: sweeps[1].iteration,
+                 label: 'c→v (iter ' + sweeps[1].iteration + ')', direction: 'to_bit'});
+  }
+
+  const hint = document.getElementById('tannerHint');
+  hint.textContent = !pairs.length
+    ? 'switch the click mode to "builds a subgraph" and pick c-nodes and v-nodes'
+    : checkList.length + ' c-nodes, ' + qubitList.length + ' v-nodes, ' +
+      pairs.length + ' edges — click an edge to see how its value was made';
+
+  const gap = 34, pad = 34, columnGap = 190;
+  const columns = layers.length + 1;
+  const width = pad * 2 + columnGap * (columns - 1) + 40;
+  const height = pad + 18 + gap * Math.max(1, checkList.length, qubitList.length);
+  const dpr = window.devicePixelRatio || 1;
+  tanner.width = width * dpr; tanner.height = height * dpr;
+  tanner.style.width = width + 'px'; tanner.style.height = height + 'px';
+  tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  tctx.clearRect(0, 0, width, height);
+  tannerHits = [];
+  if (!pairs.length || !layers.length) return;
+
+  const css = getComputedStyle(document.documentElement);
+  const colour = name => css.getPropertyValue(name).trim();
+  tctx.font = '11px ' + (css.getPropertyValue('--font-mono').trim() || 'monospace');
+  tctx.textBaseline = 'middle';
+
+  // Column c is a v-column when the first layer leaves a v-node.
+  const kinds = ['v'];
+  layers.forEach(layer => kinds.push(layer.from === 'c' ? 'c' : 'v'));
+  const columnX = index => pad + columnGap * index;
+  const rowY = (kind, id) => pad + 18 + gap *
+    ((kind === 'c' ? checkList.indexOf(id) : qubitList.indexOf(id)) + 0.5);
+
+  // Which edges fed the value the user clicked: everything into that node at
+  // the previous half-step except the message from the node being answered.
+  const feeds = new Set();
+  let excluded = null;
+  if (pickedEdge) {
+    const previous = pickedEdge.layer - 1;
+    if (previous >= 0) {
+      pairs.forEach(({check, qubit}) => {
+        const shared = kinds[pickedEdge.layer] === 'c' ? check === pickedEdge.check
+                                                       : qubit === pickedEdge.qubit;
+        if (!shared) return;
+        const key = previous + ':' + check + ':' + qubit;
+        if (check === pickedEdge.check && qubit === pickedEdge.qubit) excluded = key;
+        else feeds.add(key);
+      });
+    }
+  }
+
+  layers.forEach((layer, index) => {
+    const leftKind = kinds[index], rightKind = kinds[index + 1];
+    tctx.textAlign = 'center';
+    tctx.fillStyle = colour('--text-muted');
+    tctx.fillText(layer.label, (columnX(index) + columnX(index + 1)) / 2, 12);
+
+    pairs.forEach(({edge, check, qubit}, order) => {
+      const value = layer.values[edge];
+      const y1 = rowY(leftKind, leftKind === 'c' ? check : qubit);
+      const y2 = rowY(rightKind, rightKind === 'c' ? check : qubit);
+      const x1 = columnX(index) + 10, x2 = columnX(index + 1) - 10;
+      const key = index + ':' + check + ':' + qubit;
+      const isPicked = pickedEdge && pickedEdge.key === key;
+      const isFeed = feeds.has(key), isExcluded = excluded === key;
+      // With an edge picked, everything that had no part in its value fades
+      // out — otherwise the labels of a dozen edges sit on top of each other.
+      tctx.globalAlpha = !pickedEdge || isPicked || isFeed || isExcluded ? 1 : 0.3;
+
+      tctx.strokeStyle = isPicked ? colour('--text')
+                       : isFeed ? colour('--lit')
+                       : isExcluded ? colour('--idle')
+                       : value < 0 ? 'rgba(224,57,62,.75)' : 'rgba(90,157,240,.75)';
+      tctx.setLineDash(isExcluded ? [3, 3] : []);
+      tctx.lineWidth = isPicked ? 3 : isFeed ? 2.5
+                     : Math.max(1, Math.min(4, Math.abs(value) / 2));
+      tctx.beginPath();
+      tctx.moveTo(x1, y1);
+      tctx.lineTo(x2, y2);
+      tctx.stroke();
+      tctx.setLineDash([]);
+
+      tctx.fillStyle = isPicked || isFeed ? colour('--text') : colour('--text-muted');
+      // Stagger the labels along the line; at the midpoint they all collide
+      // where the edges converge on a node.
+      const along = 0.5 + 0.13 * ((order % 3) - 1);
+      tctx.fillText(value.toFixed(2), x1 + (x2 - x1) * along,
+                    y1 + (y2 - y1) * along - 7);
+      tctx.globalAlpha = 1;
+      tannerHits.push({key, layer: index, edge, check, qubit, x1, y1, x2, y2,
+                       value, direction: layer.direction,
+                       iteration: layer.iteration});
+    });
+  });
+
+  const step = frame();
+  kinds.forEach((kind, index) => {
+    const x = columnX(index);
+    const list = kind === 'c' ? checkList : qubitList;
+    list.forEach(id => {
+      const y = rowY(kind, id);
+      tctx.beginPath();
+      if (kind === 'c') {
+        tctx.rect(x - 8, y - 8, 16, 16);
+        if (syndromeSet.has(id)) { tctx.fillStyle = colour('--lit'); tctx.fill(); }
+        else { tctx.strokeStyle = colour('--text-secondary'); tctx.lineWidth = 2; tctx.stroke(); }
+      } else {
+        tctx.arc(x, y, 8, 0, 2 * Math.PI);
+        tctx.fillStyle = step
+          ? 'rgba(224,57,62,' + errorInk(step.llr[id], 0.95).toFixed(3) + ')'
+          : colour('--idle');
+        tctx.fill();
+        tctx.strokeStyle = errorKnown && errorSet.has(id)
+          ? colour('--error') : colour('--text-secondary');
+        tctx.lineWidth = errorKnown && errorSet.has(id) ? 2.5 : 1.5;
+        tctx.stroke();
+      }
+      if (index === 0) {                    // label the leftmost column only
+        tctx.fillStyle = colour('--text-secondary');
+        tctx.textAlign = 'right';
+        tctx.fillText((kind === 'c' ? 'c' : 'v') + id, x - 14, y);
+      }
+    });
+  });
+}
+
+function pickTannerEdge(event) {
+  const box = tanner.getBoundingClientRect();
+  const x = event.clientX - box.left, y = event.clientY - box.top;
+  let best = null, bestDistance = 64;       // 8 px, squared
+  tannerHits.forEach(hit => {
+    const dx = hit.x2 - hit.x1, dy = hit.y2 - hit.y1;
+    const length = dx * dx + dy * dy;
+    const t = Math.max(0, Math.min(1, ((x - hit.x1) * dx + (y - hit.y1) * dy) / length));
+    const px = hit.x1 + t * dx - x, py = hit.y1 + t * dy - y;
+    const distance = px * px + py * py;
+    if (distance < bestDistance) { bestDistance = distance; best = hit; }
+  });
+  return best;
+}
+
+// The arithmetic behind the clicked edge, in the same terms the code uses.
+function sayTannerEdge() {
+  const out = document.getElementById('status');
+  if (!pickedEdge) { sayMessages(); return; }
+  const sweep = sweeps.find(step => step.iteration === pickedEdge.iteration);
+  if (!sweep) { out.textContent = ''; return; }
+  const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(3);
+  const contributions = [];
+  geom.edges.forEach(([check, qubit], edge) => {
+    const shares = pickedEdge.direction === 'to_bit'
+      ? check === pickedEdge.check : qubit === pickedEdge.qubit;
+    if (!shares) return;
+    const self = check === pickedEdge.check && qubit === pickedEdge.qubit;
+    const source = pickedEdge.direction === 'to_bit'
+      ? sweep.to_check[edge] : sweep.to_bit[edge];
+    contributions.push({label: (pickedEdge.direction === 'to_bit' ? 'v' : 'c') +
+                        (pickedEdge.direction === 'to_bit' ? qubit : check),
+                        value: source, self});
+  });
+  const used = contributions.filter(term => !term.self);
+  const own = contributions.find(term => term.self);
+
+  if (pickedEdge.direction === 'to_bit') {
+    const magnitudes = used.map(term => Math.abs(term.value));
+    out.innerHTML =
+      '<b>c' + pickedEdge.check + ' → v' + pickedEdge.qubit + '</b> at iteration ' +
+      pickedEdge.iteration + ' &nbsp;=&nbsp; ' + signed(pickedEdge.value) +
+      '<br>from ' + used.map(term => term.label + ' ' + signed(term.value)).join(' &nbsp; ') +
+      '<br>smallest |·| among them = ' + Math.min(...magnitudes).toFixed(3) +
+      (syndromeSet.has(pickedEdge.check) ? ', negated (check is lit)' : '') +
+      '<br>not used: ' + (own ? own.label + ' ' + signed(own.value) : '—') +
+      ' — a c-node never repeats back what that v-node told it';
+  } else {
+    const prior = Math.log((1 - +pSlider.value) / +pSlider.value);
+    out.innerHTML =
+      '<b>v' + pickedEdge.qubit + ' → c' + pickedEdge.check + '</b> at iteration ' +
+      pickedEdge.iteration + ' &nbsp;=&nbsp; ' + signed(pickedEdge.value) +
+      '<br>prior ' + signed(prior) + ' &nbsp;+&nbsp; ' +
+      used.map(term => term.label + ' ' + signed(term.value)).join(' &nbsp;+&nbsp; ') +
+      '<br>not used: ' + (own ? own.label + ' ' + signed(own.value) : '—') +
+      ' — the answer this edge is replying to';
+  }
+}
+
 function pickCheckRow(event) {
   if (!matrixView) return null;
   const box = pcm.getBoundingClientRect();
@@ -582,6 +881,200 @@ async function decode() {
   say('');
   draw();
   report();
+  fetchMessages();
+}
+
+// Messages are fetched one sweep at a time: two numbers per Tanner edge per
+// iteration is 86k of them on the bicycle code, and only one sweep is on
+// screen.
+// Two sweeps: the one on the slider and the next, which is what the unrolled
+// picture needs to show v(k-1) -> c(k) -> v(k) -> c(k+1).
+async function fetchMessages() {
+  if (!bp || !bp.trace.length) { messages = null; return; }
+  const token = ++pending;
+  const response = await fetch('/api/bp_messages', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: geom.id, syndrome: [...syndromeSet],
+                          p: +pSlider.value, max_iter: +maxIter.value,
+                          method: methodSelect.value,
+                          iteration: +iterSlider.value, count: 2})
+  });
+  if (token !== pending) return;
+  const window = await response.json();
+  sweeps = window.steps;
+  messages = sweeps[0] || null;
+  draw();
+  sayMessages();
+}
+
+// Which nodes the edge drawing follows: everything pinned, plus whatever the
+// mouse is over at the moment.
+function shownNodes() {
+  const nodes = [];
+  activeQubits().forEach(index => nodes.push({kind: 'v', index}));
+  picked.c.forEach(index => nodes.push({kind: 'c', index}));
+  const alreadyShown = hoverNode && nodes.some(
+    node => node.kind === hoverNode.kind && node.index === hoverNode.index);
+  if (hoverNode && !alreadyShown) nodes.push(hoverNode);
+  return nodes;
+}
+
+const touches = (node, check, qubit) =>
+  node.kind === 'v' ? qubit === node.index : check === node.index;
+
+// The clicked edge and the edges whose values fed it, as indices into
+// geom.edges.  The lattice and the matrix use the same sets as the unrolled
+// picture, so a highlight means one thing everywhere.
+function highlights() {
+  if (!pickedEdge) return null;
+  const feeds = new Set();
+  let self = null;
+  geom.edges.forEach(([check, qubit], edge) => {
+    const shares = pickedEdge.direction === 'to_bit'
+      ? check === pickedEdge.check : qubit === pickedEdge.qubit;
+    if (!shares) return;
+    if (check === pickedEdge.check && qubit === pickedEdge.qubit) self = edge;
+    else feeds.add(edge);
+  });
+  return {self, feeds};
+}
+
+// Edges of the shown nodes, drawn with the value flowing along them.
+function drawEdges() {
+  const nodes = shownNodes();
+  if (!nodes.length || !messages) return;
+  const values = messages[directionSelect.value];
+  const css = getComputedStyle(document.documentElement);
+  const colour = name => css.getPropertyValue(name).trim();
+  const muted = colour('--text-muted');
+  ctx.lineCap = 'round';
+  const marked = highlights();
+  geom.edges.forEach(([check, qubit], edge) => {
+    if (!nodes.some(node => touches(node, check, qubit))) return;
+    const value = values[edge];
+    // Same three roles as the unrolled picture: the picked edge, what fed it,
+    // and everything else stepping back.
+    const role = !marked ? 'plain'
+               : edge === marked.self ? 'picked'
+               : marked.feeds.has(edge) ? 'feed' : 'faded';
+    ctx.globalAlpha = role === 'faded' ? 0.3 : 1;
+    const from = directionSelect.value === 'to_bit'
+      ? geom.z_draw[check] : [geom.qubits[qubit].x, geom.qubits[qubit].y];
+    const to = directionSelect.value === 'to_bit'
+      ? [geom.qubits[qubit].x, geom.qubits[qubit].y] : geom.z_draw[check];
+    ctx.strokeStyle = role === 'picked' ? colour('--text')
+                    : role === 'feed' ? colour('--lit')
+                    : value < 0 ? 'rgba(224,57,62,.85)' : 'rgba(90,157,240,.85)';
+    ctx.lineWidth = role === 'picked' ? 4 : role === 'feed' ? 3
+                  : Math.max(1, Math.min(5, Math.abs(value) / 2));
+    ctx.beginPath();
+    ctx.moveTo(toX(from[0], view), toY(from[1], view));
+    ctx.lineTo(toX(to[0], view), toY(to[1], view));
+    ctx.stroke();
+    // An arrowhead at the receiving end, so the direction is not a guess.
+    const headX = toX(to[0], view), headY = toY(to[1], view);
+    const angle = Math.atan2(headY - toY(from[1], view),
+                             headX - toX(from[0], view));
+    ctx.beginPath();
+    ctx.moveTo(headX, headY);
+    ctx.lineTo(headX - 8 * Math.cos(angle - 0.4), headY - 8 * Math.sin(angle - 0.4));
+    ctx.moveTo(headX, headY);
+    ctx.lineTo(headX - 8 * Math.cos(angle + 0.4), headY - 8 * Math.sin(angle + 0.4));
+    ctx.strokeStyle = muted;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  });
+
+  // Mark the pinned nodes so the subgraph is visible without the mouse.
+  ctx.globalAlpha = 1;                     // the loop above may have faded it
+  ctx.strokeStyle = colour('--text');
+  ctx.lineWidth = 2;
+  const ring = 0.3 * view.scale;
+  activeQubits().forEach(index => {
+    const qubit = geom.qubits[index];
+    ctx.beginPath();
+    ctx.arc(toX(qubit.x, view), toY(qubit.y, view), ring, 0, 2 * Math.PI);
+    ctx.stroke();
+  });
+  // A v-node the user took out of the pool: dashed, to show it is on offer.
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = colour('--text-muted');
+  ctx.lineWidth = 1.5;
+  dropped.forEach(index => {
+    if (!qubitPool().has(index)) return;
+    const qubit = geom.qubits[index];
+    ctx.beginPath();
+    ctx.arc(toX(qubit.x, view), toY(qubit.y, view), ring, 0, 2 * Math.PI);
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.strokeStyle = colour('--text');
+  ctx.lineWidth = 2;
+  picked.c.forEach(index => {
+    const centre = geom.z_draw[index];
+    ctx.beginPath();
+    ctx.arc(toX(centre[0], view), toY(centre[1], view), ring, 0, 2 * Math.PI);
+    ctx.stroke();
+  });
+}
+
+// What the hovered node received, and the arithmetic it did with it.
+function sayMessages() {
+  const out = document.getElementById('status');
+  const pinned = activeQubits().size + picked.c.size;
+  if (!hoverNode) {
+    out.innerHTML = pinned
+      ? pinned + ' node' + (pinned > 1 ? 's' : '') + ' pinned — hover one to '
+        + 'read its arithmetic, or Clear to drop them'
+      : '';
+    return;
+  }
+  if (!messages) {
+    out.textContent = 'no BP run yet — put an error or light a check';
+    return;
+  }
+  const step = frame();
+  const prior = Math.log((1 - +pSlider.value) / +pSlider.value);
+  const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(3);
+  const incident = [];
+  geom.edges.forEach(([check, qubit], edge) => {
+    if (hoverNode.kind === 'v' ? qubit === hoverNode.index
+                               : check === hoverNode.index) {
+      incident.push({edge, check, qubit});
+    }
+  });
+
+  if (hoverNode.kind === 'v') {
+    // A v-node just adds: its prior plus everything the checks told it.
+    const terms = incident.map(({edge, check}) =>
+      'c' + check + ' ' + signed(messages.to_bit[edge]));
+    const llr = step ? step.llr[hoverNode.index] : prior;
+    out.innerHTML =
+      '<b>v' + hoverNode.index + '</b> at iteration ' + messages.iteration +
+      '<br>llr = prior ' + signed(prior) + ' &nbsp;+&nbsp; ' + terms.join(' &nbsp;+&nbsp; ') +
+      ' &nbsp;=&nbsp; ' + signed(llr) +
+      '<br>P(error) = ' + errorChance(llr).toFixed(4) +
+      (llr < 0 ? ' → BP calls it an error' : ' → BP calls it clean');
+    return;
+  }
+
+  // A c-node answers each edge with the others' agreement, never that edge's
+  // own message — that exclusion is the whole of belief propagation.
+  const lit = syndromeSet.has(hoverNode.index);
+  const incoming = incident.map(({edge, qubit}) =>
+    'v' + qubit + ' ' + signed(messages.to_check[edge]));
+  const outgoing = incident.map(({edge, qubit}) =>
+    'v' + qubit + ' ' + signed(messages.to_bit[edge]));
+  const magnitudes = incident.map(({edge}) => Math.abs(messages.to_check[edge]));
+  const sorted = [...magnitudes].sort((a, b) => a - b);
+  out.innerHTML =
+    '<b>c' + hoverNode.index + '</b> at iteration ' + messages.iteration +
+    ' &nbsp; syndrome ' + (lit ? '1' : '0') +
+    '<br>in &nbsp; ' + incoming.join(' &nbsp; ') +
+    '<br>out ' + outgoing.join(' &nbsp; ') +
+    '<br>smallest two |in| = ' + sorted.slice(0, 2).map(v => v.toFixed(3)).join(', ') +
+    ' — every edge gets the smallest of the <i>others</i>' +
+    (lit ? ', negated because this check is lit' : '');
 }
 
 // Land on the last iteration: that is the belief the decoder actually acted on.
@@ -640,9 +1133,11 @@ cv.addEventListener('click', event => {
   // Shift forces a c-node, for the rare check that still overlaps a v-node.
   const wantsCheck = check.index >= 0 &&
     (event.shiftKey || qubit.index < 0 || check.distance < qubit.distance);
-  if (wantsCheck) toggleCheck(check.index);
-  else if (qubit.index >= 0) toggleQubit(qubit.index);
-  else return;
+  const node = wantsCheck ? {kind: 'c', index: check.index}
+             : qubit.index >= 0 ? {kind: 'v', index: qubit.index} : null;
+  if (!node) return;
+  if (inSubgraphMode()) { pinNode(node); return; }
+  if (node.kind === 'c') toggleCheck(node.index); else toggleQubit(node.index);
   draw();
   decode();
 });
@@ -658,13 +1153,13 @@ showChecks.addEventListener('change', draw);
 showBelief.addEventListener('change', draw);
 cellSlider.addEventListener('input', drawMatrix);
 pcm.addEventListener('click', event => {
-  const check = pickCheckRow(event);       // the gutter toggles a Z-check row
-  if (check !== null) toggleCheck(check);
-  else {
-    const column = pickColumn(event);
-    if (column === null) return;
-    toggleQubit(column);
-  }
+  const check = pickCheckRow(event);       // the gutter picks a Z-check row
+  const column = check === null ? pickColumn(event) : null;
+  if (check === null && column === null) return;
+  const node = check !== null ? {kind: 'c', index: check}
+                              : {kind: 'v', index: column};
+  if (inSubgraphMode()) { pinNode(node); return; }
+  if (node.kind === 'c') toggleCheck(node.index); else toggleQubit(node.index);
   draw();
   decode();
 });
@@ -682,9 +1177,39 @@ iterSlider.addEventListener('input', () => {
   if (bp) iterOut.textContent = iterSlider.value + ' / ' + bp.max_iter;
   draw();
   report();
+  fetchMessages();
+});
+directionSelect.addEventListener('change', () => { draw(); sayMessages(); });
+tanner.addEventListener('click', event => {
+  const hit = pickTannerEdge(event);
+  pickedEdge = (hit && pickedEdge && pickedEdge.key === hit.key) ? null : hit;
+  draw();                                  // the lattice and the matrix follow
+  sayTannerEdge();
+});
+cv.addEventListener('mousemove', event => {
+  if (!geom || !view) return;
+  const check = nearestCheck(event), qubit = nearestQubit(event);
+  const wantsCheck = check.index >= 0 &&
+    (qubit.index < 0 || check.distance < qubit.distance);
+  const found = wantsCheck ? {kind: 'c', index: check.index}
+              : qubit.index >= 0 ? {kind: 'v', index: qubit.index} : null;
+  const same = (a, b) => (!a && !b) ||
+    (a && b && a.kind === b.kind && a.index === b.index);
+  if (same(found, hoverNode)) return;
+  hoverNode = found;
+  draw();
+  sayMessages();
+});
+cv.addEventListener('mouseleave', () => {
+  hoverNode = null; draw(); sayMessages();
 });
 document.getElementById('clear').addEventListener('click', () => {
-  clearShot(); bp = null; resetIterations(); draw(); report();
+  clearShot();
+  picked.c.clear();
+  dropped.clear();
+  pickedEdge = null;
+  bp = messages = null;
+  resetIterations(); draw(); report(); sayMessages();
 });
 document.getElementById('sample').addEventListener('click', async () => {
   say('sampling …');

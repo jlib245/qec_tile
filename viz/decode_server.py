@@ -33,7 +33,7 @@ import numpy as np
 from qec_pem import (BB_CATALOG, bb_code, hypergraph_product, repetition_H,
                      rotated_surface_code)
 
-from qec_tile.bp import METHODS, bp_trace as run_bp
+from qec_tile.bp import METHODS, bp_trace as run_bp, tanner_edges
 from qec_tile.directional import build_directional_code
 from qec_tile.gf2 import nullspace2, quotient_basis, rank2
 from qec_tile.tile import TILES, paper_code
@@ -150,12 +150,13 @@ def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
     code, not a drawing bug.
     """
     HX, HZ = bb_code(l, m, A_terms, B_terms)
+    # Four sublattices per cell, as the paper draws them: the two qubit sectors
+    # on opposite corners and the two check types on the other two.  Support
+    # centroids are useless here -- every check wraps around the torus.
     left = [(SITE, float(j), float(i)) for i in range(l) for j in range(m)]
     right = [(SITE, j + 0.5, i + 0.5) for i in range(l) for j in range(m)]
-    # X-checks on the vertices, Z-checks on the faces, as the paper draws them.
-    # Support centroids are useless here: every check wraps around the torus.
-    x_points = [(float(j), float(i)) for i in range(l) for j in range(m)]
-    z_points = [(j + 0.5, i + 0.5) for i in range(l) for j in range(m)]
+    x_points = [(j + 0.5, float(i)) for i in range(l) for j in range(m)]
+    z_points = [(float(j), i + 0.5) for i in range(l) for j in range(m)]
     return _view(label, HX, HZ, left + right, x_points, z_points,
                  period=(float(m), float(l)))
 
@@ -243,6 +244,9 @@ def geometry(code_id: str) -> dict:
         z_checks=[np.flatnonzero(row).tolist() for row in view.HZ],
         x_centres=centroids(view.HX, view.x_points),
         z_centres=centroids(view.HZ, view.z_points),
+        # The Tanner edges of HZ, in the order every message array uses.
+        edges=[[int(check), int(qubit)]
+               for check, qubit in zip(*tanner_edges(view.HZ))],
         logicals=[np.flatnonzero(row).tolist() for row in view.LZ],
     )
 
@@ -335,6 +339,35 @@ def bp_trace(code_id: str, syndrome: list[int], p: float, max_iter: int = 50,
     )
 
 
+def bp_messages(code_id: str, syndrome: list[int], p: float, iteration: int,
+                count: int = 1, max_iter: int = 50,
+                ms_scaling_factor: float = 1.0,
+                method: str = "minimum_sum") -> dict:
+    """The two halves of each sweep: what v-nodes sent, what c-nodes answered.
+
+    A window of ``count`` sweeps starting at ``iteration``, because the full
+    trace would carry two numbers per Tanner edge per sweep -- 86k of them on
+    the larger bicycle code -- and the unrolled picture only ever shows a few.
+    Sweeps past the end of the run are simply absent from the result.
+    """
+    view = get_code(code_id)
+    s = _bit_vector(syndrome, view.HZ.shape[0], "check")
+    if iteration < 1:
+        raise ValueError(f"iteration {iteration} is before the first sweep")
+    if count < 1:
+        raise ValueError(f"count {count} asks for no sweeps at all")
+
+    wanted = range(iteration, iteration + count)
+    steps = [dict(iteration=step.iteration,
+                  to_check=[round(float(value), 3) for value in step.to_check],
+                  to_bit=[round(float(value), 3) for value in step.to_bit])
+             for step in run_bp(view.HZ, s, p, method=method,
+                                max_iter=min(max(wanted), max_iter),
+                                ms_scaling_factor=ms_scaling_factor)
+             if step.iteration in wanted]
+    return dict(steps=steps)
+
+
 def random_error(code_id: str, p: float, seed: int | None = None) -> list[int]:
     """One Bernoulli(p) shot, the same draw sample_residuals makes."""
     rng = np.random.default_rng(seed)
@@ -355,6 +388,10 @@ def create_app():
         max_iter: int = 50
         ms_scaling_factor: float = 1.0
         method: str = "minimum_sum"
+
+    class MessageRequest(DecodeRequest):
+        iteration: int = 1
+        count: int = 1
 
     class SampleRequest(BaseModel):
         id: str
@@ -386,6 +423,18 @@ def create_app():
             return bp_trace(request.id, request.syndrome, request.p,
                             request.max_iter, request.ms_scaling_factor,
                             request.error, request.method)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/bp_messages")
+    def api_bp_messages(request: MessageRequest):
+        try:
+            return bp_messages(request.id, request.syndrome, request.p,
+                               request.iteration, request.count,
+                               request.max_iter, request.ms_scaling_factor,
+                               request.method)
         except KeyError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:

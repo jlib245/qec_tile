@@ -11,8 +11,8 @@ weight-1 errors always come back.
 import numpy as np
 import pytest
 
-from decode_server import (CATALOG, bp_trace, catalog, geometry, get_code,
-                           random_error, syndrome_of)
+from decode_server import (CATALOG, bp_messages, bp_trace, catalog, geometry,
+                           get_code, random_error, syndrome_of)
 
 from qec_tile.gf2 import nullspace2
 
@@ -105,6 +105,34 @@ def test_the_method_reaches_the_decoder():
     assert approximate["outcome"] == "stalled"
 
 
+def test_messages_line_up_with_the_edges():
+    """One value per edge per direction, in the order geometry reports them."""
+    view = get_code(CODE_ID)
+    geo = geometry(CODE_ID)
+    assert len(geo["edges"]) == int(view.HZ.sum())
+    for check, qubit in geo["edges"]:
+        assert view.HZ[check, qubit] == 1
+
+    window = bp_messages(CODE_ID, syndrome_of(CODE_ID, [4, 20]), p=0.05,
+                         iteration=2, count=3)
+    assert [step["iteration"] for step in window["steps"]] == [2, 3, 4]
+    for step in window["steps"]:
+        assert len(step["to_check"]) == len(geo["edges"])
+        assert len(step["to_bit"]) == len(geo["edges"])
+
+
+def test_messages_stop_where_bp_stopped():
+    """Sweeps that never happened are absent, not fabricated — the page's
+    window runs one iteration past the slider and must survive the end."""
+    converging = "tile:b4w8:3"               # a single error it solves at once
+    syndrome = syndrome_of(converging, [3])
+    trace = bp_trace(converging, syndrome, p=0.05)
+    assert trace["converged_at"] == 1, "this shot is supposed to converge at 1"
+    assert bp_messages(converging, syndrome, p=0.05, iteration=40)["steps"] == []
+    window = bp_messages(converging, syndrome, p=0.05, iteration=1, count=2)
+    assert [step["iteration"] for step in window["steps"]] == [1]
+
+
 def test_max_iter_bounds_the_trace():
     result = bp_trace(CODE_ID, syndrome_of(CODE_ID, [4, 20]), p=0.05,
                       max_iter=3)
@@ -185,14 +213,19 @@ def test_only_wrapping_layouts_report_a_period(code_id, period):
     assert geometry(code_id)["period"] == period
 
 
-def test_bb_checks_use_the_paper_layout():
-    """X-checks on the vertices of the l x m torus, Z-checks on the faces."""
+def test_bb_uses_four_sublattices():
+    """Two qubit sectors and two check types, one per corner of the cell.
+
+    Putting the checks on the qubits' own sublattices would hide them under
+    the data qubits — the L sector already owns the vertices and the R sector
+    the face centres.
+    """
     geo = geometry("bb:[[72,12,6]]")
     l, m = 6, 6
     assert {tuple(centre) for centre in geo["x_centres"]} == \
-        {(float(j), float(i)) for i in range(l) for j in range(m)}
+        {(j + 0.5, float(i)) for i in range(l) for j in range(m)}
     assert {tuple(centre) for centre in geo["z_centres"]} == \
-        {(j + 0.5, i + 0.5) for i in range(l) for j in range(m)}
+        {(float(j), i + 0.5) for i in range(l) for j in range(m)}
 
 
 def test_check_points_never_land_on_a_qubit():
