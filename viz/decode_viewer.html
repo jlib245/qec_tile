@@ -9,7 +9,7 @@
   --bg:#fff; --surface-1:#f6f7f9; --surface-2:#eceef2;
   --text:#1b1d21; --text-secondary:#5a606b; --text-muted:#8b919c;
   --border:rgba(0,0,0,.12);
-  --idle:#c3c8d0; --error:#e0393e; --correction:#2a78d6;
+  --idle:#9aa2ae; --error:#e0393e; --correction:#2a78d6;
   --residual:#8b46d6; --lit:#eb6834; --ok:#1f9d55;
   --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -19,7 +19,7 @@
     --bg:#16181c; --surface-1:#1e2126; --surface-2:#272b32;
     --text:#e6e8ec; --text-secondary:#a2a9b5; --text-muted:#767d89;
     --border:rgba(255,255,255,.12);
-    --idle:#3d434c; --error:#f4595e; --correction:#5a9df0;
+    --idle:#5b6472; --error:#f4595e; --correction:#5a9df0;
     --residual:#a97ae8; --lit:#f2854f; --ok:#3ec27a;
   }
 }
@@ -39,6 +39,9 @@ label{font-size:13px;color:var(--text-secondary)}
 .split{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
 #pane{background:var(--surface-1);border-radius:12px;padding:12px;flex:1 1 620px}
 canvas{display:block;cursor:crosshair;max-width:100%}
+/* The matrix must not be scaled down: the pane scrolls instead, or clicks
+   would land on the wrong column. */
+#pcm{max-width:none}
 aside{flex:1 1 260px;min-width:240px}
 .rows{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;
       font-family:var(--font-mono);font-size:13px}
@@ -56,32 +59,59 @@ aside{flex:1 1 260px;min-width:240px}
 <body>
 <main>
 <h1>Error → syndrome → decoding</h1>
-<p class="sub">Click an edge to put an X error on that qubit. The syndrome and the
-decoding are computed by the running Python process, with the same BP+OSD the
-benchmarks use.</p>
+<p class="sub">The syndrome is the input, because it is all a decoder ever sees:
+click a check to light it, or click a qubit to flip an X error and let its
+checks follow. Min-sum BP runs in the Python process behind this page — no OSD,
+so a stalled run means no correction at all.</p>
 
 <div class="controls">
   <select id="code" aria-label="code"></select>
   <label for="p">p</label>
   <input type="range" id="p" min="0.005" max="0.2" step="0.005" value="0.05" style="width:130px">
   <span class="val" id="pOut">0.050</span>
-  <select id="decoder" aria-label="decoder"></select>
+  <select id="method" aria-label="BP method"></select>
+  <label for="maxIter">max iter</label>
+  <input type="range" id="maxIter" min="1" max="100" step="1" value="50" style="width:110px">
+  <span class="val" id="maxIterOut">50</span>
   <button id="sample" type="button">Random shot</button>
   <button id="clear" type="button">Clear</button>
   <label><input type="checkbox" id="showChecks"> show X-checks</label>
 </div>
 
+<div class="controls">
+  <label><input type="checkbox" id="showBelief" checked> BP belief</label>
+  <label for="iter">iteration</label>
+  <input type="range" id="iter" min="1" max="1" value="1" disabled style="flex:1;min-width:160px">
+  <span class="val" id="iterOut">—</span>
+</div>
+
 <div class="split">
   <div id="pane"><canvas id="cv" role="img" aria-label="code lattice"></canvas>
     <div class="legend">
-      <span class="item"><span class="swatch" style="background:var(--idle)"></span>qubit</span>
+      <span class="item"><span class="swatch" style="background:var(--idle)"></span>v-node (qubit)</span>
       <span class="item"><span class="swatch" style="background:var(--error)"></span>error e</span>
       <span class="item"><span class="swatch" style="background:var(--correction)"></span>correction ê</span>
       <span class="item"><span class="swatch" style="background:var(--residual)"></span>residual e⊕ê</span>
-      <span class="item"><span class="dot" style="background:var(--lit)"></span>lit Z-check</span>
-      <span class="item"><span class="dot" style="background:var(--idle)"></span>quiet Z-check</span>
+      <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;background:var(--lit)"></span>c-node, lit</span>
+      <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;border:1.5px solid var(--idle)"></span>c-node, quiet</span>
+      <span class="item"><span class="dot" style="background:rgba(224,57,62,.15)"></span>→<span class="dot" style="background:rgba(224,57,62,.9)"></span>P(error) from BP</span>
+      <span class="item"><span class="dot" style="border:1.5px solid var(--lit)"></span>BP's guess (P &gt; 0.5)</span>
     </div>
     <div id="status"></div>
+  </div>
+
+  <div id="matrixWrap" style="flex:1 1 100%">
+    <div class="controls" style="margin-top:14px">
+      <strong style="font-size:13px;font-weight:600">parity check matrix</strong>
+      <label for="cell">cell</label>
+      <input type="range" id="cell" min="0" max="16" value="0" style="width:120px">
+      <span class="val" id="cellOut">auto</span>
+      <span id="matrixHint" style="font-size:12px;color:var(--text-muted)"></span>
+    </div>
+    <div id="matrixPane" style="background:var(--surface-1);border-radius:12px;padding:10px;overflow:auto">
+      <canvas id="pcm" role="img" aria-label="parity check matrix"></canvas>
+    </div>
+    <div id="matrixReadout" style="font-family:var(--font-mono);font-size:12.5px;color:var(--text-secondary);margin:10px 0 0;min-height:40px;line-height:1.65"></div>
   </div>
 
   <aside>
@@ -98,18 +128,92 @@ benchmarks use.</p>
 <script>
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const codeSelect = document.getElementById('code');
-const decoderSelect = document.getElementById('decoder');
+const methodSelect = document.getElementById('method');
+const maxIter = document.getElementById('maxIter');
+const maxIterOut = document.getElementById('maxIterOut');
 const pSlider = document.getElementById('p'), pOut = document.getElementById('pOut');
 const showChecks = document.getElementById('showChecks');
 const statusLine = document.getElementById('status');
 
+const showBelief = document.getElementById('showBelief');
+const iterSlider = document.getElementById('iter'), iterOut = document.getElementById('iterOut');
+
 let geom = null;          // /api/geometry payload
-let errorSet = new Set(); // qubit indices carrying an X error
-let shot = null;          // /api/decode payload
+// The syndrome is the state: it is all a decoder ever sees.  The error is
+// tracked only while it is known — clicking a check directly makes it unknown,
+// and then there is nothing to judge a correction against.
+let syndromeSet = new Set();
+let errorSet = new Set();
+let errorKnown = true;
+let bp = null;            // /api/bp_trace payload
 let view = null;          // {scale, ox, oy}
 let pending = 0;
 
+const frame = () => (bp && bp.trace.length) ? bp.trace[+iterSlider.value - 1] : null;
+
+// Matrix panel — same layout grammar as pcm_viewer: a gutter for row numbers,
+// a ruler for column numbers, grid lines once cells are big enough.
+const pcm = document.getElementById('pcm'), pctx = pcm.getContext('2d');
+const matrixPane = document.getElementById('matrixPane');
+const cellSlider = document.getElementById('cell'), cellOut = document.getElementById('cellOut');
+const GUTTER = 46, RULER = 22, BLOCK_GAP = 26;
+let matrixView = null, matrixHover = null;
+
+// Smallest step from the ladder whose on-screen spacing clears `px`.
+function tickStep(px, cell) {
+  for (const step of [1, 2, 5, 10, 20, 25, 50, 100, 200]) {
+    if (step * cell >= px) return step;
+  }
+  return 500;
+}
+
+// BP's posterior as a probability: llr = log((1-p)/p), so p = 1/(1+e^llr).
+const errorChance = llr => 1 / (1 + Math.exp(llr));
+// Ink for that probability.  The gamma lifts the middle of the range — plain
+// alpha = P leaves everything below a coin flip nearly invisible — while
+// staying monotone, so darker still means likelier.
+const errorInk = (llr, ceiling) => ceiling * Math.pow(errorChance(llr), 0.6);
+
+const brief = list => list.length > 12
+  ? list.slice(0, 12).join(', ') + ', … (' + list.length + ')'
+  : (list.length ? list.join(', ') : '—');
+
 const say = text => { statusLine.textContent = text; };
+
+// A check sits at the centroid of its support, which for a truncated boundary
+// tile can land exactly on one of its qubits (3 of the 21 Z-checks on tile
+// b3w6 L=3).  Nudge those so a c-node is never hidden under a v-node.
+function placeChecks() {
+  const taken = new Set(geom.qubits.map(qubit => qubit.x + ':' + qubit.y));
+  geom.z_draw = geom.z_centres.map(([x, y]) =>
+    taken.has(x + ':' + y) ? [x + 0.22, y + 0.22] : [x, y]);
+}
+
+function clearShot() {
+  syndromeSet = new Set();
+  errorSet = new Set();
+  errorKnown = true;
+}
+
+// A qubit click is a shorthand: flip the error there and xor its column into
+// the syndrome, so the two stay one shot.
+function toggleQubit(qubit) {
+  if (errorKnown) {
+    if (errorSet.has(qubit)) errorSet.delete(qubit); else errorSet.add(qubit);
+  }
+  geom.z_checks.forEach((support, check) => {
+    if (!support.includes(qubit)) return;
+    if (syndromeSet.has(check)) syndromeSet.delete(check); else syndromeSet.add(check);
+  });
+}
+
+// A check click sets the syndrome by hand, which no longer corresponds to any
+// error we know of.
+function toggleCheck(check) {
+  if (syndromeSet.has(check)) syndromeSet.delete(check); else syndromeSet.add(check);
+  errorKnown = false;
+  errorSet = new Set();
+}
 
 async function boot() {
   const meta = await (await fetch('/api/codes')).json();
@@ -119,11 +223,13 @@ async function boot() {
     option.textContent = code.label;
     codeSelect.appendChild(option);
   });
-  meta.decoders.forEach(name => {
+  meta.methods.forEach(name => {
     const option = document.createElement('option');
-    option.value = option.textContent = name;
-    if (name === 'bposd_cs7') option.selected = true;
-    decoderSelect.appendChild(option);
+    option.value = name;
+    // min-sum is the approximation; say which is which in the picker.
+    option.textContent = name === 'product_sum'
+      ? 'sum-product (exact BP)' : 'min-sum (approximation)';
+    methodSelect.appendChild(option);
   });
   await loadCode(meta.codes[0].id);
 }
@@ -131,8 +237,10 @@ async function boot() {
 async function loadCode(codeId) {
   say('building ' + codeId + ' …');
   geom = await (await fetch('/api/geometry/' + encodeURIComponent(codeId))).json();
-  errorSet = new Set();
-  shot = null;
+  placeChecks();
+  clearShot();
+  bp = null;
+  resetIterations();
   say('');
   draw();
   report();
@@ -140,9 +248,15 @@ async function loadCode(codeId) {
 
 // Lattice units -> pixels, fitted to the pane with room for the outermost edges.
 function fit() {
-  const xs = geom.qubits.map(q => q.x), ys = geom.qubits.map(q => q.y);
-  const minX = Math.min(...xs) - 0.6, maxX = Math.max(...xs) + 0.6;
-  const minY = Math.min(...ys) - 0.6, maxY = Math.max(...ys) + 0.6;
+  // Boundary anchors sit outside the qubit block (x from -2 on b3w6 L=3), so
+  // the frame has to be taken over the c-nodes too or they get clipped away.
+  const marks = geom.qubits.map(q => [q.x, q.y]).concat(geom.z_draw);
+  const xs = marks.map(mark => mark[0]), ys = marks.map(mark => mark[1]);
+  // A wrapping layout shows a strip of its neighbouring copies, so the frame
+  // is widened enough for one row and column of them to be visible.
+  const margin = geom.period ? 1.1 : 0.6;
+  const minX = Math.min(...xs) - margin, maxX = Math.max(...xs) + margin;
+  const minY = Math.min(...ys) - margin, maxY = Math.max(...ys) + margin;
   const wide = Math.min(720, Math.max(320, cv.parentElement.clientWidth - 24));
   const scale = Math.min(wide / (maxX - minX), 620 / (maxY - minY));
   return {scale, ox: -minX * scale, oy: -minY * scale,
@@ -164,16 +278,45 @@ function draw() {
 
   const css = getComputedStyle(document.documentElement);
   const colour = name => css.getPropertyValue(name).trim();
-  const correction = new Set(shot ? shot.correction : []);
-  const residual = new Set(shot ? shot.residual : []);
-  const lit = new Set(shot ? shot.syndrome : []);
+  const correction = new Set(bp ? bp.correction : []);
+  const residual = new Set(bp && bp.residual ? bp.residual : []);
+  const lit = syndromeSet;                 // drawn from the click, not the reply
 
   const half = 0.42 * view.scale;
   const thickness = Math.max(3, Math.min(9, view.scale * 0.16));
 
+  // BP's state at the chosen iteration: belief as a halo, hard decision as a
+  // ring.  One monotone scale — opacity is P(error) = 1/(1+e^llr), so darker
+  // always means likelier, and the ring lands exactly at P = 0.5.
+  const step = showBelief.checked ? frame() : null;
+  const decided = new Set(step ? step.hard : []);
+
+  // On a torus the fundamental cell is drawn solid and its eight neighbours
+  // faintly, so a check that wraps reaches a qubit next to it instead of one
+  // across the picture.  Ghosts are decoration: clicks only hit the cell.
+  const ghosts = [];
+  if (geom.period) {
+    const [px, py] = geom.period;
+    for (const dx of [-px, 0, px]) {
+      for (const dy of [-py, 0, py]) {
+        if (dx || dy) ghosts.push([dx, dy]);
+      }
+    }
+  }
+  ghosts.forEach(([dx, dy]) => drawNodes(dx, dy, 0.32));
+  drawNodes(0, 0, 1);
+
+  function drawNodes(shiftX, shiftY, alpha) {
+  ctx.globalAlpha = alpha;
   geom.qubits.forEach((qubit, index) => {
-    const cx = toX(qubit.x, view), cy = toY(qubit.y, view);
-    const inError = errorSet.has(index);
+    const cx = toX(qubit.x + shiftX, view), cy = toY(qubit.y + shiftY, view);
+    if (step) {
+      ctx.fillStyle = 'rgba(224,57,62,' + errorInk(step.llr[index], 0.95).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(cx, cy, half * 0.95, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    const inError = errorKnown && errorSet.has(index);
     const inResidual = residual.has(index);
     const inCorrection = correction.has(index);
     const marked = inError || inResidual || inCorrection;
@@ -184,7 +327,7 @@ function draw() {
                 : inCorrection ? colour('--correction')
                 : colour('--idle');
     ctx.strokeStyle = shade;
-    ctx.lineWidth = marked ? thickness : thickness * 0.6;
+    ctx.lineWidth = marked ? thickness : thickness * 0.8;
     ctx.beginPath();
     if (qubit.shape === 'H') { ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); ctx.stroke(); }
     else if (qubit.shape === 'V') { ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half); ctx.stroke(); }
@@ -203,25 +346,211 @@ function draw() {
       ctx.arc(cx, cy, thickness * 0.9, 0, 2 * Math.PI);
       ctx.stroke();
     }
+
+    if (decided.has(index)) {              // BP's own call at this iteration
+      ctx.strokeStyle = colour('--lit');
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, half * 0.95, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
   });
 
-  const radius = Math.max(2.5, view.scale * 0.09);
-  geom.z_centres.forEach((centre, index) => {
-    ctx.fillStyle = lit.has(index) ? colour('--lit') : colour('--idle');
+  // Tanner-graph shapes: v-nodes (qubits) are the round marks above, c-nodes
+  // (checks) are squares.  Z-checks fill when lit; X-checks are dashed, since
+  // an X error never reaches them.
+  const radius = Math.max(3, view.scale * 0.1);
+  geom.z_draw.forEach((centre, index) => {
+    const x = toX(centre[0] + shiftX, view), y = toY(centre[1] + shiftY, view);
     ctx.beginPath();
-    ctx.arc(toX(centre[0], view), toY(centre[1], view), radius, 0, 2 * Math.PI);
-    ctx.fill();
+    ctx.rect(x - radius, y - radius, 2 * radius, 2 * radius);
+    if (lit.has(index)) {
+      ctx.fillStyle = colour('--lit');
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = colour('--text-secondary');
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
   });
   if (showChecks.checked) {
     ctx.strokeStyle = colour('--text-muted');
     ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
     geom.x_centres.forEach(centre => {
-      const x = toX(centre[0], view), y = toY(centre[1], view);
+      const x = toX(centre[0] + shiftX, view), y = toY(centre[1] + shiftY, view);
       ctx.beginPath();
       ctx.rect(x - radius, y - radius, 2 * radius, 2 * radius);
       ctx.stroke();
     });
+    ctx.setLineDash([]);
   }
+  ctx.globalAlpha = 1;
+  }                                        // end drawNodes
+
+  drawMatrix();                            // the same state, seen as a matrix
+}
+
+function drawMatrix() {
+  if (!geom) return;
+  const n = geom.n, mx = geom.x_checks.length, mz = geom.z_checks.length;
+  const available = Math.max(240, matrixPane.clientWidth - 20) - GUTTER - 4;
+  const requested = +cellSlider.value;
+  const cell = requested > 0 ? requested
+             : Math.max(1, Math.min(16, Math.floor(available / n)));
+  cellOut.textContent = (requested > 0 ? '' : 'auto ') + cell + ' px';
+
+  const width = GUTTER + n * cell + 4;
+  const height = RULER + (mx + mz) * cell + BLOCK_GAP + 6;
+  const dpr = window.devicePixelRatio || 1;
+  pcm.width = width * dpr; pcm.height = height * dpr;
+  pcm.style.width = width + 'px'; pcm.style.height = height + 'px';
+  pctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  pctx.clearRect(0, 0, width, height);
+  matrixView = {cell, n, mx, mz, yX: RULER, yZ: RULER + mx * cell + BLOCK_GAP};
+
+  const css = getComputedStyle(document.documentElement);
+  const colour = name => css.getPropertyValue(name).trim();
+  const ink = colour('--text-secondary'), muted = colour('--text-muted');
+  pctx.font = '11px ' + (css.getPropertyValue('--font-mono').trim() || 'monospace');
+  pctx.textBaseline = 'middle';
+
+  const step = showBelief.checked ? frame() : null;
+  const lit = syndromeSet;
+  const decided = new Set(step ? step.hard : []);
+  const blocks = [{name: 'X', y0: matrixView.yX, m: mx, rows: geom.x_checks},
+                  {name: 'Z', y0: matrixView.yZ, m: mz, rows: geom.z_checks}];
+
+  // A column is a qubit in both blocks, so the belief tint spans the whole
+  // height — the same number the lattice draws as a halo.
+  if (step) {
+    for (let column = 0; column < n; column++) {
+      if (errorChance(step.llr[column]) < 0.01) continue;   // keep it quiet
+      pctx.fillStyle = 'rgba(224,57,62,' + errorInk(step.llr[column], 0.8).toFixed(3) + ')';
+      blocks.forEach(block => pctx.fillRect(GUTTER + column * cell, block.y0,
+                                            cell, block.m * cell));
+    }
+  }
+
+  blocks.forEach(block => {
+    if (block.name === 'Z') {             // X errors light Z-checks, not X ones
+      pctx.fillStyle = 'rgba(235,104,52,.16)';
+      lit.forEach(row => pctx.fillRect(GUTTER, block.y0 + row * cell,
+                                       n * cell, cell));
+    }
+    if (cell >= 5) {
+      pctx.strokeStyle = colour('--border') || 'rgba(128,128,128,.2)';
+      pctx.lineWidth = 1;
+      pctx.beginPath();
+      for (let column = 0; column <= n; column++) {
+        const x = Math.round(GUTTER + column * cell) + .5;
+        pctx.moveTo(x, block.y0); pctx.lineTo(x, block.y0 + block.m * cell);
+      }
+      for (let row = 0; row <= block.m; row++) {
+        const y = Math.round(block.y0 + row * cell) + .5;
+        pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
+      }
+      pctx.stroke();
+    }
+
+    const pad = cell >= 7 ? 1 : 0;
+    block.rows.forEach((support, row) => {
+      const y = block.y0 + row * cell + pad;
+      pctx.fillStyle = (block.name === 'Z' && lit.has(row)) ? colour('--lit') : ink;
+      support.forEach(column =>
+        pctx.fillRect(GUTTER + column * cell + pad, y, cell - 2 * pad, cell - 2 * pad));
+    });
+
+    pctx.textAlign = 'right';
+    pctx.fillStyle = muted;
+    const rowStep = tickStep(13, cell);
+    for (let row = 0; row < block.m; row += rowStep) {
+      pctx.fillText(row, GUTTER - 7, block.y0 + row * cell + cell / 2);
+    }
+    pctx.textAlign = 'left';
+    pctx.fillStyle = ink;
+    pctx.fillText('H_' + block.name, 3, block.y0 - 10);
+  });
+
+  pctx.textAlign = 'center';
+  pctx.fillStyle = muted;
+  const columnStep = tickStep(26, cell);
+  for (let column = 0; column < n; column += columnStep) {
+    pctx.fillText(column, GUTTER + column * cell + cell / 2, RULER - 14);
+  }
+  // Ruler ticks: where the error actually is, and where BP thinks it is.
+  if (errorKnown) {
+    errorSet.forEach(column => {
+      pctx.fillStyle = colour('--error');
+      pctx.fillRect(GUTTER + column * cell, RULER - 7, Math.max(2, cell), 3);
+    });
+  }
+  decided.forEach(column => {
+    pctx.fillStyle = colour('--lit');
+    pctx.fillRect(GUTTER + column * cell, RULER - 3, Math.max(2, cell), 2);
+  });
+
+  if (matrixHover !== null) {
+    pctx.strokeStyle = muted;
+    pctx.lineWidth = 1.5;
+    blocks.forEach(block => pctx.strokeRect(GUTTER + matrixHover * cell + .5,
+                                            block.y0 + .5, cell, block.m * cell));
+  }
+
+  document.getElementById('matrixHint').textContent = cell >= 5
+    ? 'click a column to flip that qubit, or a row number to light that check'
+    : 'cells are ' + cell + ' px at n=' + n + ' — raise the cell slider';
+}
+
+function pickColumn(event) {
+  if (!matrixView) return null;
+  const box = pcm.getBoundingClientRect();
+  const x = event.clientX - box.left - GUTTER;
+  const column = Math.floor(x / matrixView.cell);
+  return (x >= 0 && column >= 0 && column < matrixView.n) ? column : null;
+}
+
+function sayMatrix() {
+  const out = document.getElementById('matrixReadout');
+  if (matrixHover === null) { out.textContent = ''; return; }
+  const step = frame();
+  const checks = geom.z_checks
+    .map((support, row) => support.includes(matrixHover) ? row : -1)
+    .filter(row => row >= 0);
+  out.innerHTML =
+    'qubit ' + matrixHover +
+    (errorKnown && errorSet.has(matrixHover) ? '  (error)' : '') +
+    '<br>Z-checks ' + brief(checks) +
+    '<br>' + (step
+      ? 'BP iteration ' + step.iteration + ': P(error) = ' +
+        errorChance(step.llr[matrixHover]).toFixed(4) +
+        '  (llr ' + step.llr[matrixHover].toFixed(3) + ')' +
+        (step.hard.includes(matrixHover) ? '  → called an error' : '')
+      : 'no BP trace yet');
+}
+
+// Both hit tests report their distance so the click can go to whichever node
+// is actually nearer, instead of one kind always winning.
+function nearestCheck(event) {
+  const box = cv.getBoundingClientRect();
+  const x = event.clientX - box.left, y = event.clientY - box.top;
+  let best = -1, bestDistance = Infinity;
+  geom.z_draw.forEach((centre, index) => {
+    const dx = toX(centre[0], view) - x, dy = toY(centre[1], view) - y;
+    const distance = dx * dx + dy * dy;
+    if (distance < bestDistance) { bestDistance = distance; best = index; }
+  });
+  return {index: bestDistance <= (0.3 * view.scale) ** 2 ? best : -1,
+          distance: bestDistance};
+}
+
+function pickCheckRow(event) {
+  if (!matrixView) return null;
+  const box = pcm.getBoundingClientRect();
+  const x = event.clientX - box.left, y = event.clientY - box.top;
+  if (x >= GUTTER) return null;            // the gutter, where row numbers are
+  const row = Math.floor((y - matrixView.yZ) / matrixView.cell);
+  return (row >= 0 && row < matrixView.mz) ? row : null;
 }
 
 function nearestQubit(event) {
@@ -233,23 +562,35 @@ function nearestQubit(event) {
     const distance = dx * dx + dy * dy;
     if (distance < bestDistance) { bestDistance = distance; best = index; }
   });
-  return bestDistance <= (0.45 * view.scale) ** 2 ? best : -1;
+  return {index: bestDistance <= (0.45 * view.scale) ** 2 ? best : -1,
+          distance: bestDistance};
 }
 
 async function decode() {
   const token = ++pending;
-  if (!errorSet.size) { shot = null; draw(); report(); return; }
-  say('decoding …');
-  const response = await fetch('/api/decode', {
+  say('running BP …');
+  const response = await fetch('/api/bp_trace', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({id: geom.id, error: [...errorSet],
-                          p: +pSlider.value, decoder: decoderSelect.value})
+    body: JSON.stringify({id: geom.id, syndrome: [...syndromeSet],
+                          error: errorKnown ? [...errorSet] : null,
+                          p: +pSlider.value, max_iter: +maxIter.value,
+                          method: methodSelect.value})
   });
   if (token !== pending) return;          // a newer click already superseded this
-  shot = await response.json();
+  bp = await response.json();
+  resetIterations();
   say('');
   draw();
   report();
+}
+
+// Land on the last iteration: that is the belief the decoder actually acted on.
+function resetIterations() {
+  const steps = bp ? bp.trace.length : 0;
+  iterSlider.max = Math.max(1, steps);
+  iterSlider.value = Math.max(1, steps);
+  iterSlider.disabled = steps < 2;
+  iterOut.textContent = steps ? steps + ' / ' + bp.max_iter : '—';
 }
 
 function report() {
@@ -258,48 +599,92 @@ function report() {
   const weight = list => list ? list.length : 0;
   document.getElementById('numbers').innerHTML =
     row('n', geom.n) + row('k', geom.k) +
-    row('error wt', errorSet.size) +
-    row('syndrome wt', weight(shot && shot.syndrome)) +
-    row('correction wt', weight(shot && shot.correction)) +
-    row('residual wt', weight(shot && shot.residual));
+    row('error wt', errorKnown ? errorSet.size : 'unknown') +
+    row('syndrome wt', syndromeSet.size) +
+    row('correction wt', weight(bp && bp.correction)) +
+    row('residual wt', bp && bp.residual ? bp.residual.length : '—') +
+    row('BP', !bp ? '—'
+        : bp.converged_at ? 'converged at ' + bp.converged_at
+        : 'stalled after ' + bp.max_iter) +
+    row('BP guess wt', frame() ? frame().hard.length : 0);
 
   const verdict = document.getElementById('verdict');
-  if (!shot) {
-    verdict.textContent = errorSet.size ? 'decoding …' : 'click a qubit to start';
-    verdict.style.color = '';
-    return;
-  }
   const css = getComputedStyle(document.documentElement);
-  if (shot.failure) {
-    verdict.innerHTML = 'logical failure — residual flips L_Z ' +
-      shot.logicals_flipped.join(', ');
-    verdict.style.color = css.getPropertyValue('--error').trim();
-  } else if (shot.residual.length) {
-    verdict.innerHTML = 'corrected — residual is a stabilizer (weight ' +
-      shot.residual.length + ')';
-    verdict.style.color = css.getPropertyValue('--ok').trim();
+  const paint = (text, colourName) => {
+    verdict.textContent = text;
+    verdict.style.color = colourName ? css.getPropertyValue(colourName).trim() : '';
+  };
+  if (!bp) { paint('click a qubit, or a check to set the syndrome by hand'); return; }
+  if (bp.outcome === 'unreachable') {
+    paint('unreachable syndrome — no error produces this, so no decoder can '
+          + 'explain it', '--error');
+  } else if (bp.outcome === 'stalled') {
+    paint('BP stalled after ' + bp.max_iter + ' iterations — its guess does '
+          + 'not match the syndrome, so there is no correction', '--error');
+  } else if (bp.outcome === 'logical_error') {
+    paint('logical error — residual flips L_Z ' + bp.logicals_flipped.join(', '),
+          '--error');
+  } else if (!errorKnown) {
+    paint('BP converged at ' + bp.converged_at + ' — a correction consistent '
+          + 'with the syndrome (the true error is unknown)', '--ok');
+  } else if (bp.residual && bp.residual.length) {
+    paint('corrected — residual is a stabilizer (weight ' + bp.residual.length
+          + ')', '--ok');
   } else {
-    verdict.textContent = 'corrected exactly — residual is empty';
-    verdict.style.color = css.getPropertyValue('--ok').trim();
+    paint('corrected exactly — residual is empty', '--ok');
   }
 }
 
 cv.addEventListener('click', event => {
-  const qubit = nearestQubit(event);
-  if (qubit < 0) return;
-  if (errorSet.has(qubit)) errorSet.delete(qubit); else errorSet.add(qubit);
+  const check = nearestCheck(event), qubit = nearestQubit(event);
+  // Shift forces a c-node, for the rare check that still overlaps a v-node.
+  const wantsCheck = check.index >= 0 &&
+    (event.shiftKey || qubit.index < 0 || check.distance < qubit.distance);
+  if (wantsCheck) toggleCheck(check.index);
+  else if (qubit.index >= 0) toggleQubit(qubit.index);
+  else return;
   draw();
   decode();
 });
 codeSelect.addEventListener('change', () => loadCode(codeSelect.value));
-decoderSelect.addEventListener('change', decode);
+methodSelect.addEventListener('change', decode);
+maxIter.addEventListener('input', () => { maxIterOut.textContent = maxIter.value; });
+maxIter.addEventListener('change', decode);
 pSlider.addEventListener('input', () => {
   pOut.textContent = (+pSlider.value).toFixed(3);
 });
 pSlider.addEventListener('change', decode);
 showChecks.addEventListener('change', draw);
+showBelief.addEventListener('change', draw);
+cellSlider.addEventListener('input', drawMatrix);
+pcm.addEventListener('click', event => {
+  const check = pickCheckRow(event);       // the gutter toggles a Z-check row
+  if (check !== null) toggleCheck(check);
+  else {
+    const column = pickColumn(event);
+    if (column === null) return;
+    toggleQubit(column);
+  }
+  draw();
+  decode();
+});
+pcm.addEventListener('mousemove', event => {
+  const column = pickColumn(event);
+  if (column === matrixHover) return;
+  matrixHover = column;
+  drawMatrix();
+  sayMatrix();
+});
+pcm.addEventListener('mouseleave', () => {
+  matrixHover = null; drawMatrix(); sayMatrix();
+});
+iterSlider.addEventListener('input', () => {
+  if (bp) iterOut.textContent = iterSlider.value + ' / ' + bp.max_iter;
+  draw();
+  report();
+});
 document.getElementById('clear').addEventListener('click', () => {
-  errorSet = new Set(); shot = null; draw(); report();
+  clearShot(); bp = null; resetIterations(); draw(); report();
 });
 document.getElementById('sample').addEventListener('click', async () => {
   say('sampling …');
@@ -307,7 +692,10 @@ document.getElementById('sample').addEventListener('click', async () => {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({id: geom.id, p: +pSlider.value})
   });
-  errorSet = new Set((await response.json()).error);
+  const drawn = await response.json();
+  errorSet = new Set(drawn.error);
+  syndromeSet = new Set(drawn.syndrome);
+  errorKnown = true;
   draw();
   decode();
 });

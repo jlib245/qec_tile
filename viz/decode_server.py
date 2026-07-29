@@ -33,7 +33,7 @@ import numpy as np
 from qec_pem import (BB_CATALOG, bb_code, hypergraph_product, repetition_H,
                      rotated_surface_code)
 
-from qec_tile.decode import DECODERS
+from qec_tile.bp import METHODS, bp_trace as run_bp
 from qec_tile.directional import build_directional_code
 from qec_tile.gf2 import nullspace2, quotient_basis, rank2
 from qec_tile.tile import TILES, paper_code
@@ -59,6 +59,13 @@ class CodeView:
     points: list[tuple[str, float, float]]
     LX: np.ndarray
     LZ: np.ndarray
+    # Where to draw the checks, when the construction knows better than the
+    # centroid of the support does.  None means "work it out from the support".
+    x_points: list[tuple[float, float]] | None = None
+    z_points: list[tuple[float, float]] | None = None
+    # (period_x, period_y) for a layout that wraps, so the page can draw the
+    # neighbouring copies instead of long lines across the picture.
+    period: tuple[float, float] | None = None
 
     @property
     def n(self) -> int:
@@ -69,24 +76,40 @@ class CodeView:
         return self.n - rank2(self.HX) - rank2(self.HZ)
 
 
-def _view(label: str, HX, HZ, points) -> CodeView:
+def _view(label: str, HX, HZ, points, x_points=None, z_points=None,
+          period=None) -> CodeView:
     """Attach logicals to a code that only came with its two check matrices."""
     HX = np.asarray(HX, dtype=np.uint8)
     HZ = np.asarray(HZ, dtype=np.uint8)
     if len(points) != HX.shape[1]:
         raise ValueError(f"{label}: {len(points)} points for "
                          f"{HX.shape[1]} qubits")
+    for name, given, count in (("x_points", x_points, HX.shape[0]),
+                               ("z_points", z_points, HZ.shape[0])):
+        if given is not None and len(given) != count:
+            raise ValueError(f"{label}: {len(given)} {name} for {count} checks")
     return CodeView(label, HX, HZ, list(points),
                     quotient_basis(HX, nullspace2(HZ)),
-                    quotient_basis(HZ, nullspace2(HX)))
+                    quotient_basis(HZ, nullspace2(HX)),
+                    x_points=x_points, z_points=z_points, period=period)
 
 
 def _view_tile(label: str, code) -> CodeView:
-    """Tile and directional codes: qubits are edges, so use edge midpoints."""
+    """Tile and directional codes: qubits are edges, so use edge midpoints.
+
+    Checks go at their anchor -- the lower-left corner of their B x B box --
+    not at the centroid of their support: a tile truncated by the boundary
+    keeps only its inner qubits, so the centroid drifts into the bulk and the
+    check ends up drawn on top of the lattice it actually hangs off.  Anchors
+    are lattice vertices, and every qubit sits at a half-integer in one axis,
+    so a check never lands on one.
+    """
     points = [(EDGE_H, x + 0.5, float(y)) if orient == "H"
               else (EDGE_V, float(x), y + 0.5)
               for orient, x, y in code.qubits]
-    return CodeView(label, code.HX, code.HZ, points, *code.logicals())
+    return CodeView(label, code.HX, code.HZ, points, *code.logicals(),
+                    x_points=[(float(x), float(y)) for x, y in code.x_anchors],
+                    z_points=[(float(x), float(y)) for x, y in code.z_anchors])
 
 
 def _view_rotated_surface(label: str, d: int) -> CodeView:
@@ -97,7 +120,7 @@ def _view_rotated_surface(label: str, d: int) -> CodeView:
     return _view(label, HX, HZ, points)
 
 
-def _view_hgp(label: str, H1, H2) -> CodeView:
+def _view_hgp(label: str, H1, H2, period=None) -> CodeView:
     """Hypergraph product layout: sector A on vertices, sector B on faces.
 
     ``hypergraph_product`` stacks ``[H1 (x) I_n2 | I_m1 (x) H2^T]``, so the
@@ -110,7 +133,13 @@ def _view_hgp(label: str, H1, H2) -> CodeView:
     m2, n2 = H2.shape
     points = [(SITE, float(j), float(i)) for i in range(n1) for j in range(n2)]
     points += [(SITE, b + 0.5, a + 0.5) for a in range(m1) for b in range(m2)]
-    return _view(label, HX, HZ, points)
+    # Checks are indexed the same way and sit on the edges between the sites
+    # they join.  The centroid of the support would not do for the cyclic case:
+    # a check joining row 0 to row L-1 wraps, and its average lands in the
+    # middle of the lattice, nowhere near either.
+    x_points = [(float(j), a + 0.5) for a in range(m1) for j in range(n2)]
+    z_points = [(b + 0.5, float(i)) for i in range(n1) for b in range(m2)]
+    return _view(label, HX, HZ, points, x_points, z_points, period)
 
 
 def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
@@ -123,7 +152,12 @@ def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
     HX, HZ = bb_code(l, m, A_terms, B_terms)
     left = [(SITE, float(j), float(i)) for i in range(l) for j in range(m)]
     right = [(SITE, j + 0.5, i + 0.5) for i in range(l) for j in range(m)]
-    return _view(label, HX, HZ, left + right)
+    # X-checks on the vertices, Z-checks on the faces, as the paper draws them.
+    # Support centroids are useless here: every check wraps around the torus.
+    x_points = [(float(j), float(i)) for i in range(l) for j in range(m)]
+    z_points = [(j + 0.5, i + 0.5) for i in range(l) for j in range(m)]
+    return _view(label, HX, HZ, left + right, x_points, z_points,
+                 period=(float(m), float(l)))
 
 
 # Small enough that BP+OSD answers within a click and the layout still reads
@@ -154,7 +188,8 @@ CATALOG: dict[str, tuple[str, callable]] = {
                       lambda L=L:
                       _view_hgp(f"toric, L={L}",
                                 repetition_H(L, cyclic=True),
-                                repetition_H(L, cyclic=True)))
+                                repetition_H(L, cyclic=True),
+                                period=(float(L), float(L))))
        for L in (3, 4, 5)},
     # The larger BB codes decode fine but the torus picture stops being useful.
     **{f"bb:{name}": (f"bivariate bicycle {name}",
@@ -174,11 +209,9 @@ def get_code(code_id: str) -> CodeView:
 
 
 @lru_cache(maxsize=None)
-def get_decoder(code_id: str, p: float, decoder: str):
-    """Decoders are expensive to build and cheap to reuse; keep them warm."""
-    if decoder not in DECODERS:
-        raise KeyError(f"unknown decoder {decoder!r}")
-    return DECODERS[decoder](get_code(code_id).HZ, p)
+def _check_rank(code_id: str) -> int:
+    """rank(HZ) — the yardstick for whether a hand-built syndrome is real."""
+    return rank2(get_code(code_id).HZ)
 
 
 def catalog() -> list[dict]:
@@ -191,7 +224,9 @@ def geometry(code_id: str) -> dict:
     """Everything the page needs to draw one code, once."""
     view = get_code(code_id)
 
-    def centroids(checks):
+    def centroids(checks, given):
+        if given is not None:
+            return [[float(x), float(y)] for x, y in given]
         out = []
         for row in checks:
             support = np.flatnonzero(row)
@@ -202,38 +237,101 @@ def geometry(code_id: str) -> dict:
 
     return dict(
         id=code_id, label=view.label, n=view.n, k=view.k,
+        period=list(view.period) if view.period else None,
         qubits=[dict(shape=shape, x=x, y=y) for shape, x, y in view.points],
         x_checks=[np.flatnonzero(row).tolist() for row in view.HX],
         z_checks=[np.flatnonzero(row).tolist() for row in view.HZ],
-        x_centres=centroids(view.HX),
-        z_centres=centroids(view.HZ),
+        x_centres=centroids(view.HX, view.x_points),
+        z_centres=centroids(view.HZ, view.z_points),
         logicals=[np.flatnonzero(row).tolist() for row in view.LZ],
     )
 
 
-def decode_shot(code_id: str, error: list[int], p: float,
-                decoder: str = "bposd_cs7") -> dict:
-    """Decode one X-error pattern and report every stage of the shot."""
-    view = get_code(code_id)
-    e = np.zeros(view.n, dtype=np.uint8)
-    for qubit in error:
-        if not 0 <= qubit < view.n:
-            raise ValueError(f"qubit {qubit} outside [0, {view.n})")
-        e[qubit] ^= 1
+def _bit_vector(indices: list[int], length: int, what: str) -> np.ndarray:
+    """Clicked indices -> a 0/1 vector; clicking the same one twice cancels."""
+    vector = np.zeros(length, dtype=np.uint8)
+    for index in indices:
+        if not 0 <= index < length:
+            raise ValueError(f"{what} {index} outside [0, {length})")
+        vector[index] ^= 1
+    return vector
 
-    syndrome = ((view.HZ @ e) % 2).astype(np.uint8)
-    e_hat = get_decoder(code_id, p, decoder).decode(syndrome).astype(np.uint8)
-    residual = (e ^ e_hat) % 2
-    flipped = (np.flatnonzero((view.LZ @ residual) % 2) if view.LZ.size
-               else np.array([], dtype=int))
+
+def syndrome_of(code_id: str, error: list[int]) -> list[int]:
+    """The checks an X-error pattern lights, for callers that start from one."""
+    view = get_code(code_id)
+    e = _bit_vector(error, view.n, "qubit")
+    return np.flatnonzero((view.HZ @ e) % 2).tolist()
+
+
+def bp_trace(code_id: str, syndrome: list[int], p: float, max_iter: int = 50,
+             ms_scaling_factor: float = 1.0, error: list[int] | None = None,
+             method: str = "minimum_sum") -> dict:
+    """Run BP on a syndrome and report its belief after every iteration.
+
+    The syndrome is the input because it is all a decoder ever sees.  ``error``
+    is optional and only says what really happened: with it the residual and
+    the logical verdict are meaningful, without it there is nothing to compare
+    a correction against and those fields stay None.
+
+    There is no OSD here.  When BP stalls the answer is not a worse correction,
+    it is *no* correction: ``H @ correction != syndrome``, so the outcome is
+    "stalled" rather than a logical failure.
+    """
+    view = get_code(code_id)
+    s = _bit_vector(syndrome, view.HZ.shape[0], "check")
+
+    # A syndrome invented by clicking checks need not be in the image of HZ.
+    # Toric and BB codes have dependent checks, so unreachable combinations
+    # exist and no decoder can explain them -- say so instead of blaming BP.
+    # Reachable means HZ x = s has a solution, so s joins as a *column*:
+    # appending it must not raise the rank.
+    reachable = bool(rank2(np.hstack([view.HZ, s.reshape(-1, 1)]))
+                     == _check_rank(code_id))
+
+    trace = [dict(iteration=step.iteration,
+                  converge=step.converged,
+                  hard=np.flatnonzero(step.hard).tolist(),
+                  # 3 decimals: the full arrays are 300 KB on the larger codes
+                  llr=[round(float(value), 3) for value in step.llr])
+             for step in run_bp(view.HZ, s, p, method=method,
+                                max_iter=max_iter,
+                                ms_scaling_factor=ms_scaling_factor)]
+
+    correction = np.zeros(view.n, dtype=np.uint8)
+    if trace:
+        correction[trace[-1]["hard"]] = 1
+    valid = bool(trace and trace[-1]["converge"])
+
+    residual = flipped = None
+    outcome = "corrected" if valid else ("stalled" if reachable
+                                         else "unreachable")
+    if error is not None:
+        e = _bit_vector(error, view.n, "qubit")
+        if not np.array_equal((view.HZ @ e) % 2, s):
+            raise ValueError("error does not produce this syndrome")
+        if valid:
+            residual_vector = (e ^ correction) % 2
+            residual = np.flatnonzero(residual_vector).tolist()
+            flipped = [int(i) for i in
+                       (np.flatnonzero((view.LZ @ residual_vector) % 2)
+                        if view.LZ.size else [])]
+            if flipped:
+                outcome = "logical_error"
 
     return dict(
-        error=np.flatnonzero(e).tolist(),
-        syndrome=np.flatnonzero(syndrome).tolist(),
-        correction=np.flatnonzero(e_hat).tolist(),
-        residual=np.flatnonzero(residual).tolist(),
-        logicals_flipped=[int(i) for i in flipped],
-        failure=bool(flipped.size),
+        max_iter=int(max_iter),
+        method=method,
+        converged_at=trace[-1]["iteration"] if valid else None,
+        reachable=reachable,
+        syndrome=np.flatnonzero(s).tolist(),
+        correction=np.flatnonzero(correction).tolist(),
+        error=None if error is None else np.flatnonzero(
+            _bit_vector(error, view.n, "qubit")).tolist(),
+        residual=residual,
+        logicals_flipped=flipped,
+        outcome=outcome,
+        trace=trace,
     )
 
 
@@ -251,9 +349,12 @@ def create_app():
 
     class DecodeRequest(BaseModel):
         id: str
-        error: list[int] = []
+        syndrome: list[int] = []
+        error: list[int] | None = None
         p: float = 0.05
-        decoder: str = "bposd_cs7"
+        max_iter: int = 50
+        ms_scaling_factor: float = 1.0
+        method: str = "minimum_sum"
 
     class SampleRequest(BaseModel):
         id: str
@@ -264,11 +365,13 @@ def create_app():
 
     @app.get("/")
     def page():
-        return FileResponse(PAGE)
+        # The page is edited while the server runs; a cached copy against a
+        # newer API is the confusing kind of broken.
+        return FileResponse(PAGE, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/codes")
     def api_codes():
-        return dict(codes=catalog(), decoders=sorted(DECODERS))
+        return dict(codes=catalog(), methods=list(METHODS))
 
     @app.get("/api/geometry/{code_id}")
     def api_geometry(code_id: str):
@@ -277,11 +380,12 @@ def create_app():
         except KeyError as exc:
             raise HTTPException(404, str(exc))
 
-    @app.post("/api/decode")
-    def api_decode(request: DecodeRequest):
+    @app.post("/api/bp_trace")
+    def api_bp_trace(request: DecodeRequest):
         try:
-            return decode_shot(request.id, request.error, request.p,
-                               request.decoder)
+            return bp_trace(request.id, request.syndrome, request.p,
+                            request.max_iter, request.ms_scaling_factor,
+                            request.error, request.method)
         except KeyError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:
@@ -290,7 +394,8 @@ def create_app():
     @app.post("/api/sample")
     def api_sample(request: SampleRequest):
         try:
-            return dict(error=random_error(request.id, request.p, request.seed))
+            error = random_error(request.id, request.p, request.seed)
+            return dict(error=error, syndrome=syndrome_of(request.id, error))
         except KeyError as exc:
             raise HTTPException(404, str(exc))
 
