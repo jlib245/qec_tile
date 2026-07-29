@@ -116,7 +116,7 @@ async function boot() {
   meta.codes.forEach(code => {
     const option = document.createElement('option');
     option.value = code.id;
-    option.textContent = code.label + '  [[' + code.n + ',' + code.k + ']]';
+    option.textContent = code.label;
     codeSelect.appendChild(option);
   });
   meta.decoders.forEach(name => {
@@ -140,7 +140,7 @@ async function loadCode(codeId) {
 
 // Lattice units -> pixels, fitted to the pane with room for the outermost edges.
 function fit() {
-  const xs = geom.qubits.map(q => q.mx), ys = geom.qubits.map(q => q.my);
+  const xs = geom.qubits.map(q => q.x), ys = geom.qubits.map(q => q.y);
   const minX = Math.min(...xs) - 0.6, maxX = Math.max(...xs) + 0.6;
   const minY = Math.min(...ys) - 0.6, maxY = Math.max(...ys) + 0.6;
   const wide = Math.min(720, Math.max(320, cv.parentElement.clientWidth - 24));
@@ -172,22 +172,27 @@ function draw() {
   const thickness = Math.max(3, Math.min(9, view.scale * 0.16));
 
   geom.qubits.forEach((qubit, index) => {
-    const cx = toX(qubit.mx, view), cy = toY(qubit.my, view);
-    const horizontal = qubit.orient === 'H';
+    const cx = toX(qubit.x, view), cy = toY(qubit.y, view);
     const inError = errorSet.has(index);
     const inResidual = residual.has(index);
     const inCorrection = correction.has(index);
+    const marked = inError || inResidual || inCorrection;
 
     ctx.lineCap = 'round';
-    ctx.strokeStyle = inResidual ? colour('--residual')
-                    : inError ? colour('--error')
-                    : inCorrection ? colour('--correction')
-                    : colour('--idle');
-    ctx.lineWidth = (inError || inResidual || inCorrection) ? thickness : thickness * 0.6;
+    const shade = inResidual ? colour('--residual')
+                : inError ? colour('--error')
+                : inCorrection ? colour('--correction')
+                : colour('--idle');
+    ctx.strokeStyle = shade;
+    ctx.lineWidth = marked ? thickness : thickness * 0.6;
     ctx.beginPath();
-    if (horizontal) { ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); }
-    else { ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half); }
-    ctx.stroke();
+    if (qubit.shape === 'H') { ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy); ctx.stroke(); }
+    else if (qubit.shape === 'V') { ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half); ctx.stroke(); }
+    else {                                  // a site, not an edge
+      ctx.fillStyle = shade;
+      ctx.arc(cx, cy, marked ? thickness * 0.85 : thickness * 0.55, 0, 2 * Math.PI);
+      ctx.fill();
+    }
 
     // A correction that did not land on the error itself is worth seeing even
     // when the qubit is drawn in another colour.
@@ -224,7 +229,7 @@ function nearestQubit(event) {
   const x = event.clientX - box.left, y = event.clientY - box.top;
   let best = -1, bestDistance = Infinity;
   geom.qubits.forEach((qubit, index) => {
-    const dx = toX(qubit.mx, view) - x, dy = toY(qubit.my, view) - y;
+    const dx = toX(qubit.x, view) - x, dy = toY(qubit.y, view) - y;
     const distance = dx * dx + dy * dy;
     if (distance < bestDistance) { bestDistance = distance; best = index; }
   });

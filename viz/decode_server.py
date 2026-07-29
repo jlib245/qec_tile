@@ -1,6 +1,6 @@
-"""Serve an interactive error -> syndrome -> decoding view of a tile code.
+"""Serve an interactive error -> syndrome -> decoding view of a CSS code.
 
-The browser draws the lattice and collects clicks; every number it shows comes
+The browser draws the layout and collects clicks; every number it shows comes
 from this process, decoded by the same BP+OSD the benchmarks use, so what the
 page reports is what qec_tile would report.
 
@@ -12,46 +12,165 @@ The X sector is the one on screen, following decode.py:
     r = e ^ e_hat     the residual
     failure  <=>  LZ @ r != 0
 
-Run it (fastapi is not a project dependency -- keep it out of pyproject):
+Tile and directional codes come from qec_tile; surface, toric and bivariate
+bicycle codes from qec_pem.py next door, which carries no coordinates, so the
+layouts for those are built here (see the _view_* builders).
 
-    uv run --with fastapi --with uvicorn python data/decode_server.py
+Run it (fastapi and uvicorn are in the dev dependency group):
+
+    uv run python viz/decode_server.py
 """
-from __future__ import annotations
-
+# No `from __future__ import annotations` here: it stringifies annotations, and
+# FastAPI resolves an endpoint's hints against module globals, where the request
+# models defined inside create_app() do not exist -- the body silently becomes a
+# query parameter and every POST answers 422.
 import argparse
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+from qec_pem import (BB_CATALOG, bb_code, hypergraph_product, repetition_H,
+                     rotated_surface_code)
 
 from qec_tile.decode import DECODERS
 from qec_tile.directional import build_directional_code
+from qec_tile.gf2 import nullspace2, quotient_basis, rank2
 from qec_tile.tile import TILES, paper_code
 
 PAGE = Path(__file__).with_name("decode_viewer.html")
 
-# Small enough that BP+OSD answers within a click, and that the lattice still
-# reads at screen size.  id -> (label, builder).
+# How a qubit is drawn: an edge of the lattice, or a plain site.
+EDGE_H, EDGE_V, SITE = "H", "V", "o"
+
+
+@dataclass
+class CodeView:
+    """A CSS code plus a drawable layout — all the page needs about it.
+
+    ``points[q]`` is ``(shape, x, y)``: where qubit ``q`` sits, and whether to
+    draw it as a horizontal edge, a vertical edge or a dot.  Checks are not
+    placed here; ``geometry`` puts each one at the centroid of its support,
+    which lands a truncated boundary check on the qubits it actually touches.
+    """
+    label: str
+    HX: np.ndarray
+    HZ: np.ndarray
+    points: list[tuple[str, float, float]]
+    LX: np.ndarray
+    LZ: np.ndarray
+
+    @property
+    def n(self) -> int:
+        return int(self.HX.shape[1])
+
+    @property
+    def k(self) -> int:
+        return self.n - rank2(self.HX) - rank2(self.HZ)
+
+
+def _view(label: str, HX, HZ, points) -> CodeView:
+    """Attach logicals to a code that only came with its two check matrices."""
+    HX = np.asarray(HX, dtype=np.uint8)
+    HZ = np.asarray(HZ, dtype=np.uint8)
+    if len(points) != HX.shape[1]:
+        raise ValueError(f"{label}: {len(points)} points for "
+                         f"{HX.shape[1]} qubits")
+    return CodeView(label, HX, HZ, list(points),
+                    quotient_basis(HX, nullspace2(HZ)),
+                    quotient_basis(HZ, nullspace2(HX)))
+
+
+def _view_tile(label: str, code) -> CodeView:
+    """Tile and directional codes: qubits are edges, so use edge midpoints."""
+    points = [(EDGE_H, x + 0.5, float(y)) if orient == "H"
+              else (EDGE_V, float(x), y + 0.5)
+              for orient, x, y in code.qubits]
+    return CodeView(label, code.HX, code.HZ, points, *code.logicals())
+
+
+def _view_rotated_surface(label: str, d: int) -> CodeView:
+    """Qubit ``i*d + j`` sits at column j, row i of the d x d block."""
+    HX, HZ = rotated_surface_code(d)
+    points = [(SITE, float(j), float(d - 1 - i))
+              for i in range(d) for j in range(d)]
+    return _view(label, HX, HZ, points)
+
+
+def _view_hgp(label: str, H1, H2) -> CodeView:
+    """Hypergraph product layout: sector A on vertices, sector B on faces.
+
+    ``hypergraph_product`` stacks ``[H1 (x) I_n2 | I_m1 (x) H2^T]``, so the
+    first ``n1*n2`` columns are indexed ``(i, j)`` over the two code lengths
+    and the rest ``(a, b)`` over the two check counts.  Offsetting the second
+    sector by half a cell is what makes the planar picture readable.
+    """
+    HX, HZ = hypergraph_product(H1, H2)
+    m1, n1 = H1.shape
+    m2, n2 = H2.shape
+    points = [(SITE, float(j), float(i)) for i in range(n1) for j in range(n2)]
+    points += [(SITE, b + 0.5, a + 0.5) for a in range(m1) for b in range(m2)]
+    return _view(label, HX, HZ, points)
+
+
+def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
+    """Bivariate bicycle: two sectors on an l x m torus, index ``i*m + j``.
+
+    There is no planar embedding — the lattice wraps in both directions, so a
+    check's support can straddle opposite edges of the picture.  That is the
+    code, not a drawing bug.
+    """
+    HX, HZ = bb_code(l, m, A_terms, B_terms)
+    left = [(SITE, float(j), float(i)) for i in range(l) for j in range(m)]
+    right = [(SITE, j + 0.5, i + 0.5) for i in range(l) for j in range(m)]
+    return _view(label, HX, HZ, left + right)
+
+
+# Small enough that BP+OSD answers within a click and the layout still reads
+# at screen size.  id -> (label, builder); the label is static so listing the
+# catalog costs nothing -- building a code means solving for its logicals.
 CATALOG: dict[str, tuple[str, callable]] = {
     **{f"tile:{name}:{L}": (f"tile {name}, L={L}",
-                            (lambda name=name, L=L: paper_code(name, L, L)))
+                            lambda name=name, L=L:
+                            _view_tile(f"tile {name}, L={L}",
+                                       paper_code(name, L, L)))
        for name in sorted(TILES) for L in (3, 4, 5)},
     **{f"dir:{word}:{M}x{N}": (f"directional {word}, {M}x{N}",
-                               (lambda word=word, M=M, N=N:
-                                build_directional_code(word, M, N)))
+                               lambda word=word, M=M, N=N:
+                               _view_tile(f"directional {word}, {M}x{N}",
+                                          build_directional_code(word, M, N)))
        for word, M, N in (("N2ESEN2", 4, 4), ("N2E2SE2N2", 5, 4),
                           ("N2E2SESE2N2", 5, 4))},
+    **{f"rotated:{d}": (f"rotated surface, d={d}",
+                        lambda d=d:
+                        _view_rotated_surface(f"rotated surface, d={d}", d))
+       for d in (3, 5, 7)},
+    **{f"unrotated:{d}": (f"unrotated surface, d={d}",
+                          lambda d=d:
+                          _view_hgp(f"unrotated surface, d={d}",
+                                    repetition_H(d), repetition_H(d)))
+       for d in (3, 4, 5)},
+    **{f"toric:{L}": (f"toric, L={L}",
+                      lambda L=L:
+                      _view_hgp(f"toric, L={L}",
+                                repetition_H(L, cyclic=True),
+                                repetition_H(L, cyclic=True)))
+       for L in (3, 4, 5)},
+    # The larger BB codes decode fine but the torus picture stops being useful.
+    **{f"bb:{name}": (f"bivariate bicycle {name}",
+                      lambda name=name:
+                      _view_bb(f"bivariate bicycle {name}",
+                               BB_CATALOG[name]["l"], BB_CATALOG[name]["m"],
+                               BB_CATALOG[name]["A"], BB_CATALOG[name]["B"]))
+       for name in ("[[72,12,6]]", "[[144,12,12]]")},
 }
 
 
 @lru_cache(maxsize=None)
-def get_code(code_id: str):
-    """The TileCode plus its Z-logicals, built once per id."""
+def get_code(code_id: str) -> CodeView:
     if code_id not in CATALOG:
         raise KeyError(f"unknown code {code_id!r}")
-    code = CATALOG[code_id][1]()
-    _LX, LZ = code.logicals()
-    return code, LZ
+    return CATALOG[code_id][1]()
 
 
 @lru_cache(maxsize=None)
@@ -59,66 +178,54 @@ def get_decoder(code_id: str, p: float, decoder: str):
     """Decoders are expensive to build and cheap to reuse; keep them warm."""
     if decoder not in DECODERS:
         raise KeyError(f"unknown decoder {decoder!r}")
-    code, _LZ = get_code(code_id)
-    return DECODERS[decoder](code.HZ, p)
+    return DECODERS[decoder](get_code(code_id).HZ, p)
 
 
 def catalog() -> list[dict]:
-    """What the code picker offers."""
-    out = []
-    for code_id, (label, _build) in CATALOG.items():
-        code, _LZ = get_code(code_id)
-        out.append(dict(id=code_id, label=label, n=code.n, k=code.k,
-                        B=code.B, L1=code.L1, L2=code.L2))
-    return out
+    """What the code picker offers; n and k arrive with the geometry."""
+    return [dict(id=code_id, label=label)
+            for code_id, (label, _build) in CATALOG.items()]
 
 
 def geometry(code_id: str) -> dict:
-    """Everything the page needs to draw the lattice once.
-
-    Qubits are edges, so each gets the midpoint of the edge it sits on; checks
-    get the centroid of their support, which keeps a truncated boundary check
-    on top of the qubits it actually touches.
-    """
-    code, LZ = get_code(code_id)
-    midpoints = [(x + 0.5, float(y)) if orient == "H" else (float(x), y + 0.5)
-                 for orient, x, y in code.qubits]
+    """Everything the page needs to draw one code, once."""
+    view = get_code(code_id)
 
     def centroids(checks):
         out = []
         for row in checks:
             support = np.flatnonzero(row)
-            points = np.array([midpoints[col] for col in support])
-            out.append([float(points[:, 0].mean()), float(points[:, 1].mean())])
+            xs = [view.points[col][1] for col in support]
+            ys = [view.points[col][2] for col in support]
+            out.append([float(np.mean(xs)), float(np.mean(ys))])
         return out
 
     return dict(
-        id=code_id, n=code.n, k=code.k, B=code.B, L1=code.L1, L2=code.L2,
-        qubits=[dict(orient=orient, x=int(x), y=int(y),
-                     mx=float(midpoint[0]), my=float(midpoint[1]))
-                for (orient, x, y), midpoint in zip(code.qubits, midpoints)],
-        x_checks=[np.flatnonzero(row).tolist() for row in code.HX],
-        z_checks=[np.flatnonzero(row).tolist() for row in code.HZ],
-        x_centres=centroids(code.HX),
-        z_centres=centroids(code.HZ),
-        logicals=[np.flatnonzero(row).tolist() for row in LZ],
+        id=code_id, label=view.label, n=view.n, k=view.k,
+        qubits=[dict(shape=shape, x=x, y=y) for shape, x, y in view.points],
+        x_checks=[np.flatnonzero(row).tolist() for row in view.HX],
+        z_checks=[np.flatnonzero(row).tolist() for row in view.HZ],
+        x_centres=centroids(view.HX),
+        z_centres=centroids(view.HZ),
+        logicals=[np.flatnonzero(row).tolist() for row in view.LZ],
     )
 
 
 def decode_shot(code_id: str, error: list[int], p: float,
                 decoder: str = "bposd_cs7") -> dict:
     """Decode one X-error pattern and report every stage of the shot."""
-    code, LZ = get_code(code_id)
-    e = np.zeros(code.n, dtype=np.uint8)
+    view = get_code(code_id)
+    e = np.zeros(view.n, dtype=np.uint8)
     for qubit in error:
-        if not 0 <= qubit < code.n:
-            raise ValueError(f"qubit {qubit} outside [0, {code.n})")
+        if not 0 <= qubit < view.n:
+            raise ValueError(f"qubit {qubit} outside [0, {view.n})")
         e[qubit] ^= 1
 
-    syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
+    syndrome = ((view.HZ @ e) % 2).astype(np.uint8)
     e_hat = get_decoder(code_id, p, decoder).decode(syndrome).astype(np.uint8)
     residual = (e ^ e_hat) % 2
-    flipped = np.flatnonzero((LZ @ residual) % 2) if LZ.size else np.array([])
+    flipped = (np.flatnonzero((view.LZ @ residual) % 2) if view.LZ.size
+               else np.array([], dtype=int))
 
     return dict(
         error=np.flatnonzero(e).tolist(),
@@ -132,9 +239,8 @@ def decode_shot(code_id: str, error: list[int], p: float,
 
 def random_error(code_id: str, p: float, seed: int | None = None) -> list[int]:
     """One Bernoulli(p) shot, the same draw sample_residuals makes."""
-    code, _LZ = get_code(code_id)
     rng = np.random.default_rng(seed)
-    return np.flatnonzero(rng.random(code.n) < p).tolist()
+    return np.flatnonzero(rng.random(get_code(code_id).n) < p).tolist()
 
 
 def create_app():
@@ -154,7 +260,7 @@ def create_app():
         p: float = 0.05
         seed: int | None = None
 
-    app = FastAPI(title="tile code decoding viewer")
+    app = FastAPI(title="CSS code decoding viewer")
 
     @app.get("/")
     def page():

@@ -9,8 +9,8 @@ Surface and bivariate-bicycle codes come from qec_pem.py next door, which is a
 standalone reference implementation, not part of the qec_tile package.
 
 Usage:
-    python data/pcm_viewer.py
-    python data/pcm_viewer.py --layouts 4,8 --no-directional
+    python viz/pcm_viewer.py
+    python viz/pcm_viewer.py --layouts 4,8 --no-directional
 """
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from qec_tile.tile import TILES, paper_code
 SURFACE_DISTANCES = (3, 5, 7)      # rotated needs odd d; keep the others aligned
 TORIC_SIZES = (3, 4, 5)
 TEMPLATE = Path(__file__).with_name("pcm_viewer_template.html")
+# Generated pages belong with the other outputs, not next to their source.
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def matrix_payload(label: str, HX, HZ, note: str = "",
@@ -125,7 +127,7 @@ def render(entries: list[dict], template_path=TEMPLATE) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(TEMPLATE.with_name("pcm_viewer.html")))
+    ap.add_argument("--out", default=str(DATA_DIR / "pcm_viewer.html"))
     ap.add_argument("--layouts", default=(4, 6, 8, 10),
                     type=lambda spec: tuple(int(L) for L in spec.split(",")),
                     help="bulk sizes L to bake for each tile, e.g. 4,8")
