@@ -220,20 +220,37 @@ function tickStep(px, cell) {
   return 500;
 }
 
+// Gallager's phi(x) = -log tanh(x/2), its own inverse, with the same guards as
+// bp.py: the bias saturates at 1 in double precision around x = 37, its log
+// does not.  Recomputing with a tanh product here would clip at 26.7 and
+// disagree with the value the server sent.
+function phi(x) {
+  const magnitude = Math.abs(x);
+  if (magnitude < 1) {
+    return Math.log(2 + Math.expm1(-magnitude)) - Math.log(-Math.expm1(-magnitude));
+  }
+  const decay = Math.exp(-magnitude);
+  return Math.log1p(decay) - Math.log1p(-decay);
+}
+
 // How the picked method turns the other edges' messages into this edge's
 // answer, worked out on the numbers actually on screen.
 function checkRule(others, lit) {
-  const flip = lit ? '−' : '+';
-  if (methodSelect.value === 'product_sum') {
-    const product = others.reduce((acc, value) => acc * Math.tanh(value / 2), 1);
-    return '2·atanh(∏ tanh(m/2)) over them = ' +
-      (2 * Math.atanh(product)).toFixed(3) +
-      ', taken with sign ' + flip + ' (check is ' + (lit ? 'lit' : 'quiet') + ')';
-  }
-  const magnitudes = others.map(Math.abs);
-  return 'smallest |m| among them = ' + Math.min(...magnitudes).toFixed(3) +
-    ', taken with sign ' + flip + ' × ∏ sign(m)' +
-    ' (check is ' + (lit ? 'lit' : 'quiet') + ')';
+  // Two independent sign factors, multiplied: the syndrome bit, because the
+  // check demands parity s_c rather than 0, and the parity of the incoming
+  // signs.  Both are spelled out so neither reads as the other.
+  const syndromeSign = lit ? -1 : 1;
+  const productSign = others.filter(value => value < 0).length % 2 ? -1 : 1;
+  const show = value => (value > 0 ? '+1' : '−1');
+  const magnitude = methodSelect.value === 'product_sum'
+    ? 'φ(Σ φ(|m|)) over them = ' +
+      phi(others.reduce((acc, value) => acc + phi(value), 0)).toFixed(3) +
+      ' &nbsp; [φ(x) = −log tanh(x/2), its own inverse]'
+    : 'smallest |m| among them = ' +
+      Math.min(...others.map(Math.abs)).toFixed(3);
+  return magnitude +
+    '<br>sign = (−1)^s × ∏ sign(m) = (' + show(syndromeSign) + ') × (' +
+    show(productSign) + ') = ' + show(syndromeSign * productSign);
 }
 
 // BP's posterior as a probability: llr = log((1-p)/p), so p = 1/(1+e^llr).
@@ -1142,7 +1159,7 @@ function sayMessages() {
   const outgoing = incident.map(({edge, qubit}) =>
     'v' + qubit + ' ' + signed(messages.to_bit[edge]));
   const rule = methodSelect.value === 'product_sum'
-    ? 'each out = 2·atanh(∏ tanh(in/2)) over the <i>other</i> edges'
+    ? 'each out = φ(Σ φ(|in|)) over the <i>other</i> edges, φ(x) = −log tanh(x/2)'
     : 'each out = smallest |in| among the <i>other</i> edges, signed';
   out.innerHTML =
     '<b>c' + hoverNode.index + '</b> at iteration ' + messages.iteration +
