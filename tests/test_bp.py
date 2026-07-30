@@ -155,6 +155,32 @@ def test_next_sweep_subtracts_the_message_it_answered(method):
         assert np.allclose(later.to_check, earlier.llr[cols] - earlier.to_bit)
 
 
+def test_strong_beliefs_do_not_saturate():
+    """A product of tanh clips hard: tanh(m/2) reaches 1.0 in double precision
+    around m = 37, since 1 - tanh(m/2) ~ 2 exp(-m) falls under eps there, and
+    then every stronger belief comes back as 2 atanh(1 - 1e-12) = 26.71.
+    Gallager's involution phi(x) = -log tanh(x/2) stores -log of that bias
+    instead, which floating point has room for.  At p = 1e-18 the prior is
+    41.45 and a weight-6 check answers 39.84.
+    """
+    code = paper_code("b3w6", 3, 3)
+    syndrome = np.zeros(code.HZ.shape[0], dtype=np.uint8)
+    step = next(iter(bp_trace(code.HZ, syndrome, 1e-18, method="product_sum",
+                              max_iter=1)))
+    assert np.abs(step.to_bit).min() > 35
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_messages_stay_finite(method):
+    """phi(0) is infinite, and a row sum of infinities minus one of them is
+    nan -- the exclusion has to survive a zero message, not poison the row."""
+    code = paper_code("b3w6", 3, 3)
+    syndrome = syndrome_of(code, [4, 20])
+    for step in bp_trace(code.HZ, syndrome, 1e-12, method=method, max_iter=20):
+        assert np.isfinite(step.to_bit).all(), step.iteration
+        assert np.isfinite(step.llr).all(), step.iteration
+
+
 def test_unknown_method_is_rejected():
     code = paper_code("b3w6", 3, 3)
     with pytest.raises(ValueError):

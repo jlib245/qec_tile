@@ -78,10 +78,33 @@ def _prior_llr(channel, n: int) -> np.ndarray:
 
 METHODS = ("minimum_sum", "product_sum")
 
-# tanh saturates at +-1 in double precision, and the "all the others" product
-# is taken by dividing the row's product by the edge's own factor, so a factor
-# of exactly +-1 would divide by zero.  Clip just inside.
-_TANH_LIMIT = 1 - 1e-12
+
+def _phi(magnitude: np.ndarray) -> np.ndarray:
+    """Gallager's ``-log tanh(x/2)``, which is its own inverse.
+
+    Storing ``-log`` of the bias rather than the bias itself is what keeps
+    strong beliefs: ``1 - tanh(x/2) ~ 2 exp(-x)`` slips under double eps around
+    ``x = 37``, so a product of tanh cannot tell 37 from 100, while its log is
+    an ordinary small number.  Both ends need the right identity, since
+    ``1 + u`` and ``1 - u`` (with ``u = exp(-x)``) each lose everything at one
+    extreme::
+
+        x >= 1:  log1p(u) - log1p(-u)                       u is tiny
+        x <  1:  log(2 + expm1(-x)) - log(-expm1(-x))       1 - u is about x
+
+    ``phi(0)`` is ``+inf`` and ``phi(inf)`` is 0, which is the right behaviour:
+    a check that hears "no idea" from one qubit has nothing to tell the others.
+    """
+    magnitude = np.abs(magnitude)
+    small = magnitude < 1.0
+    out = np.empty_like(magnitude, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gap = -np.expm1(-magnitude)              # 1 - exp(-x), exact for small x
+        out[small] = (np.log(2.0 + np.expm1(-magnitude[small]))
+                      - np.log(gap[small]))
+        decay = np.exp(-magnitude[~small])
+        out[~small] = np.log1p(decay) - np.log1p(-decay)
+    return out
 
 
 def bp_trace(H: np.ndarray, syndrome: np.ndarray, channel,
@@ -116,6 +139,10 @@ def bp_trace(H: np.ndarray, syndrome: np.ndarray, channel,
     # value is discarded wherever degree == 1.
     second_slot = np.where(degree > 1, np.minimum(row_starts + 1, rows.size - 1),
                            row_starts)
+    # Position of each edge within its check, for the prefix/suffix sums
+    # product_sum needs.
+    slot = np.arange(rows.size) - row_starts[rows]
+    widest = int(degree.max())
     check_flip = np.where(syndrome[rows] == 1, -1.0, 1.0)
     message_to_check = prior[cols].copy()
 
@@ -141,16 +168,21 @@ def bp_trace(H: np.ndarray, syndrome: np.ndarray, channel,
                              magnitude[smallest][rows])
             message_to_bit = ms_scaling_factor * sign * check_flip * other
         else:                                # product_sum
-            # Divide the row's product of tanh by the edge's own factor, done
-            # as a subtraction of logs so the row reduction stays a bincount.
-            factor = np.clip(np.tanh(message_to_check / 2),
-                             -_TANH_LIMIT, _TANH_LIMIT)
-            log_magnitude = np.log(np.abs(factor))
-            row_log = np.bincount(rows, weights=log_magnitude,
-                                  minlength=n_checks)
-            other = np.exp(row_log[rows] - log_magnitude) * sign
-            message_to_bit = 2 * np.arctanh(
-                np.clip(other, -_TANH_LIMIT, _TANH_LIMIT)) * check_flip
+            # phi turns the product over "the others" into a sum.  Taking that
+            # sum for the row and subtracting the edge's own term would look
+            # cheaper, but it cancels catastrophically -- one dominant term
+            # leaves 0.405 - 0.405 = 0 and phi(0) is infinite.  Summing what
+            # lies before and after each edge instead keeps it to additions,
+            # and infinities (a zero message) propagate correctly.
+            transformed = _phi(message_to_check)
+            grid = np.zeros((n_checks, widest))
+            grid[rows, slot] = transformed
+            before = np.zeros_like(grid)
+            before[:, 1:] = np.cumsum(grid[:, :-1], axis=1)
+            after = np.zeros_like(grid)
+            after[:, :-1] = np.cumsum(grid[:, :0:-1], axis=1)[:, ::-1]
+            others = (before + after)[rows, slot]
+            message_to_bit = sign * check_flip * _phi(others)
 
         llr = prior + np.bincount(cols, weights=message_to_bit, minlength=n)
         hard = (llr < 0).astype(np.uint8)
