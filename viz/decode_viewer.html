@@ -112,11 +112,15 @@ so a stalled run means no correction at all.</p>
   <div id="tannerWrap" style="flex:1 1 100%">
     <div class="controls" style="margin-top:14px">
       <strong style="font-size:13px;font-weight:600">Tanner graph</strong>
+      <button id="tannerPrev" type="button" title="previous iteration">◀</button>
+      <span class="val" id="tannerIter" style="min-width:74px">—</span>
+      <button id="tannerNext" type="button" title="next iteration">▶</button>
       <span id="tannerHint" style="font-size:12px;color:var(--text-muted)"></span>
     </div>
     <div id="tannerPane" style="background:var(--surface-1);border-radius:12px;padding:10px;overflow:auto">
       <canvas id="tanner" role="img" aria-label="Tanner graph of the picked nodes"></canvas>
     </div>
+    <div id="tannerReadout" style="font-family:var(--font-mono);font-size:12.5px;color:var(--text-secondary);margin:10px 0 0;min-height:56px;line-height:1.7"></div>
   </div>
 
   <div id="matrixWrap" style="flex:1 1 100%">
@@ -214,6 +218,22 @@ function tickStep(px, cell) {
     if (step * cell >= px) return step;
   }
   return 500;
+}
+
+// How the picked method turns the other edges' messages into this edge's
+// answer, worked out on the numbers actually on screen.
+function checkRule(others, lit) {
+  const flip = lit ? '−' : '+';
+  if (methodSelect.value === 'product_sum') {
+    const product = others.reduce((acc, value) => acc * Math.tanh(value / 2), 1);
+    return '2·atanh(∏ tanh(m/2)) over them = ' +
+      (2 * Math.atanh(product)).toFixed(3) +
+      ', taken with sign ' + flip + ' (check is ' + (lit ? 'lit' : 'quiet') + ')';
+  }
+  const magnitudes = others.map(Math.abs);
+  return 'smallest |m| among them = ' + Math.min(...magnitudes).toFixed(3) +
+    ', taken with sign ' + flip + ' × ∏ sign(m)' +
+    ' (check is ' + (lit ? 'lit' : 'quiet') + ')';
 }
 
 // BP's posterior as a probability: llr = log((1-p)/p), so p = 1/(1+e^llr).
@@ -661,13 +681,19 @@ function drawTanner() {
                  label: 'c→v (iter ' + sweeps[1].iteration + ')', direction: 'to_bit'});
   }
 
+  const total = bp ? bp.trace.length : 0;
+  document.getElementById('tannerIter').textContent =
+    total ? 'iter ' + iterSlider.value + ' / ' + total : '—';
+  document.getElementById('tannerPrev').disabled = +iterSlider.value <= 1;
+  document.getElementById('tannerNext').disabled = +iterSlider.value >= total;
+
   const hint = document.getElementById('tannerHint');
   hint.textContent = !pairs.length
     ? 'switch the click mode to "builds a subgraph" and pick c-nodes and v-nodes'
     : checkList.length + ' c-nodes, ' + qubitList.length + ' v-nodes, ' +
       pairs.length + ' edges — click an edge to see how its value was made';
 
-  const gap = 34, pad = 34, columnGap = 190;
+  const gap = 46, pad = 34, columnGap = 190;   // room for a value under each node
   const columns = layers.length + 1;
   const width = pad * 2 + columnGap * (columns - 1) + 40;
   const height = pad + 18 + gap * Math.max(1, checkList.length, qubitList.length);
@@ -753,10 +779,23 @@ function drawTanner() {
     });
   });
 
+  // Each v-column carries the posterior of a different sweep: the one before
+  // this window opened, then one per c->v layer that has gone by.
+  const first = sweeps[0].iteration;
+  const llrForColumn = index => {
+    const iteration = first - 1 + Math.floor(index / 2);
+    if (iteration < 1) {                   // nothing has been added yet
+      return geom.qubits.map(() => Math.log((1 - +pSlider.value) / +pSlider.value));
+    }
+    const past = bp.trace[iteration - 1];
+    return past ? past.llr : null;
+  };
+
   const step = frame();
   kinds.forEach((kind, index) => {
     const x = columnX(index);
     const list = kind === 'c' ? checkList : qubitList;
+    const llrs = kind === 'v' ? llrForColumn(index) : null;
     list.forEach(id => {
       const y = rowY(kind, id);
       tctx.beginPath();
@@ -775,10 +814,23 @@ function drawTanner() {
         tctx.lineWidth = errorKnown && errorSet.has(id) ? 2.5 : 1.5;
         tctx.stroke();
       }
-      if (index === 0) {                    // label the leftmost column only
+      if (index === 0) {                    // names go on the leftmost column
         tctx.fillStyle = colour('--text-secondary');
         tctx.textAlign = 'right';
         tctx.fillText((kind === 'c' ? 'c' : 'v') + id, x - 14, y);
+      }
+      // Every v-node carries its own posterior at that point in the sweep;
+      // without it the outgoing message (llr minus one reply) reads as magic.
+      if (kind === 'v' && llrs) {
+        tctx.fillStyle = colour('--text');
+        tctx.textAlign = 'center';
+        tctx.fillText((llrs[id] >= 0 ? '+' : '−') + Math.abs(llrs[id]).toFixed(2),
+                      x, y + 19);
+      }
+      if (kind === 'c') {
+        tctx.fillStyle = colour('--text-muted');
+        tctx.textAlign = 'center';
+        tctx.fillText('s=' + (syndromeSet.has(id) ? 1 : 0), x, y + 19);
       }
     });
   });
@@ -799,10 +851,10 @@ function pickTannerEdge(event) {
   return best;
 }
 
-// The arithmetic behind the clicked edge, in the same terms the code uses.
+// The arithmetic behind the clicked edge, written under the graph it belongs to.
 function sayTannerEdge() {
-  const out = document.getElementById('status');
-  if (!pickedEdge) { sayMessages(); return; }
+  const out = document.getElementById('tannerReadout');
+  if (!pickedEdge) { out.innerHTML = ''; return; }
   const sweep = sweeps.find(step => step.iteration === pickedEdge.iteration);
   if (!sweep) { out.textContent = ''; return; }
   const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(3);
@@ -822,13 +874,12 @@ function sayTannerEdge() {
   const own = contributions.find(term => term.self);
 
   if (pickedEdge.direction === 'to_bit') {
-    const magnitudes = used.map(term => Math.abs(term.value));
     out.innerHTML =
       '<b>c' + pickedEdge.check + ' → v' + pickedEdge.qubit + '</b> at iteration ' +
       pickedEdge.iteration + ' &nbsp;=&nbsp; ' + signed(pickedEdge.value) +
       '<br>from ' + used.map(term => term.label + ' ' + signed(term.value)).join(' &nbsp; ') +
-      '<br>smallest |·| among them = ' + Math.min(...magnitudes).toFixed(3) +
-      (syndromeSet.has(pickedEdge.check) ? ', negated (check is lit)' : '') +
+      '<br>' + checkRule(used.map(term => term.value),
+                         syndromeSet.has(pickedEdge.check)) +
       '<br>not used: ' + (own ? own.label + ' ' + signed(own.value) : '—') +
       ' — a c-node never repeats back what that v-node told it';
   } else {
@@ -903,8 +954,15 @@ async function fetchMessages() {
   const window = await response.json();
   sweeps = window.steps;
   messages = sweeps[0] || null;
+  // The slider may have moved the window off the picked edge's sweep; drop the
+  // selection rather than explaining a value that is no longer on screen.
+  if (pickedEdge &&
+      !sweeps.some(step => step.iteration === pickedEdge.iteration)) {
+    pickedEdge = null;
+  }
   draw();
   sayMessages();
+  sayTannerEdge();
 }
 
 // Which nodes the edge drawing follows: everything pinned, plus whatever the
@@ -984,6 +1042,24 @@ function drawEdges() {
     ctx.lineWidth = 1;
     ctx.stroke();
   });
+
+  // The posterior of every v-node on screen, so the message arithmetic can be
+  // checked against it.  Only the shown ones: all of them at once is a mess.
+  ctx.globalAlpha = 1;
+  const step = frame();
+  if (step) {
+    ctx.font = '11px ' + (css.getPropertyValue('--font-mono').trim() || 'monospace');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = colour('--text');
+    nodes.forEach(node => {
+      if (node.kind !== 'v') return;
+      const qubit = geom.qubits[node.index];
+      const value = step.llr[node.index];
+      ctx.fillText((value >= 0 ? '+' : '−') + Math.abs(value).toFixed(2),
+                   toX(qubit.x, view), toY(qubit.y, view) - 0.34 * view.scale);
+    });
+  }
 
   // Mark the pinned nodes so the subgraph is visible without the mouse.
   ctx.globalAlpha = 1;                     // the loop above may have faded it
@@ -1065,16 +1141,15 @@ function sayMessages() {
     'v' + qubit + ' ' + signed(messages.to_check[edge]));
   const outgoing = incident.map(({edge, qubit}) =>
     'v' + qubit + ' ' + signed(messages.to_bit[edge]));
-  const magnitudes = incident.map(({edge}) => Math.abs(messages.to_check[edge]));
-  const sorted = [...magnitudes].sort((a, b) => a - b);
+  const rule = methodSelect.value === 'product_sum'
+    ? 'each out = 2·atanh(∏ tanh(in/2)) over the <i>other</i> edges'
+    : 'each out = smallest |in| among the <i>other</i> edges, signed';
   out.innerHTML =
     '<b>c' + hoverNode.index + '</b> at iteration ' + messages.iteration +
     ' &nbsp; syndrome ' + (lit ? '1' : '0') +
     '<br>in &nbsp; ' + incoming.join(' &nbsp; ') +
     '<br>out ' + outgoing.join(' &nbsp; ') +
-    '<br>smallest two |in| = ' + sorted.slice(0, 2).map(v => v.toFixed(3)).join(', ') +
-    ' — every edge gets the smallest of the <i>others</i>' +
-    (lit ? ', negated because this check is lit' : '');
+    '<br>' + rule + (lit ? ', negated because this check is lit' : '');
 }
 
 // Land on the last iteration: that is the belief the decoder actually acted on.
@@ -1173,12 +1248,22 @@ pcm.addEventListener('mousemove', event => {
 pcm.addEventListener('mouseleave', () => {
   matrixHover = null; drawMatrix(); sayMatrix();
 });
-iterSlider.addEventListener('input', () => {
+// One place to land on an iteration, whether the slider or the graph's buttons
+// asked for it.
+function showIteration(value) {
+  const last = +iterSlider.max;
+  iterSlider.value = Math.max(1, Math.min(last, value));
   if (bp) iterOut.textContent = iterSlider.value + ' / ' + bp.max_iter;
   draw();
   report();
   fetchMessages();
-});
+}
+
+iterSlider.addEventListener('input', () => showIteration(+iterSlider.value));
+document.getElementById('tannerPrev').addEventListener('click',
+  () => showIteration(+iterSlider.value - 1));
+document.getElementById('tannerNext').addEventListener('click',
+  () => showIteration(+iterSlider.value + 1));
 directionSelect.addEventListener('change', () => { draw(); sayMessages(); });
 tanner.addEventListener('click', event => {
   const hit = pickTannerEdge(event);
