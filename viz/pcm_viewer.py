@@ -33,13 +33,20 @@ TEMPLATE = Path(__file__).with_name("pcm_viewer_template.html")
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
-def matrix_payload(label: str, HX, HZ, note: str = "",
-                   dividers=()) -> dict:
+def matrix_payload(label: str, HX, HZ, note: str = "", dividers=(),
+                   block=None) -> dict:
     """One code as a JSON-ready dict: sparse rows plus the stat-card numbers.
 
     Rows travel as ascending column indices -- a weight-6 check is 6 numbers
     instead of n.  ``dividers`` are qubit-sector boundaries (HGP and BB codes
     split into two blocks); the viewer draws a dashed line at each.
+
+    ``block`` is where the index arithmetic folds -- ``{"rows_x", "rows_z",
+    "cols"}`` -- so the viewer can rule the grid on the code's own period
+    rather than an arbitrary five.  Rows count checks and columns count
+    qubits, which is why the two are given apart, and ``cols`` carries one
+    width per sector.  None for a code built geometrically, which has no such
+    period.
     """
     HX = np.asarray(HX, dtype=np.uint8)
     HZ = np.asarray(HZ, dtype=np.uint8)
@@ -57,6 +64,7 @@ def matrix_payload(label: str, HX, HZ, note: str = "",
         wz=int(HZ.sum(1).max()) if HZ.size else 0,
         css=not bool(overlap.any()),
         dividers=[int(d) for d in dividers],
+        block=block,
         X=[np.flatnonzero(row).tolist() for row in HX],
         Z=[np.flatnonzero(row).tolist() for row in HZ],
     )
@@ -71,24 +79,33 @@ def build_catalog(layouts=(4, 6, 8, 10), directional: bool = True,
     """
     entries: list[dict] = []
 
-    def add(group, param, HX, HZ, note="", dividers=()):
+    def add(group, param, HX, HZ, note="", dividers=(), block=None):
         entries.append(dict(matrix_payload(f"{group}  {param}", HX, HZ,
-                                           note, dividers),
+                                           note, dividers, block),
                             group=group, param=param))
 
     for name in sorted(TILES):
+        B = 3 if name.startswith("b3") else 4
         for L in layouts:
             code = paper_code(name, L, L)
+            # Anchors fold every L2 rows, qubits every L2+B-1 columns: the
+            # qubit lattice is B-1 wider than the anchor grid.  The H and V
+            # sectors have the same shape, so both widths are the same.
             add(f"tile {name}", f"L={L}", code.HX, code.HZ,
                 note=f"Tile {name} on {L}x{L} bulk anchors. "
-                     f"Short rows are boundary tiles cut by the lattice edge.")
+                     f"Short rows are boundary tiles cut by the lattice edge.",
+                dividers=(code.n // 2,),
+                block=dict(rows_x=L, rows_z=L, cols=[L + B - 1, L + B - 1]))
 
     if directional:
         for word, M, N, n, k, d in PAPER_CODES:
             code = build_directional_code(word, M, N)
             add("directional", f"{word}, {M}x{N}", code.HX, code.HZ,
                 note=f"Compass walk {word} on an {M}x{N} anchor grid. "
-                     f"Paper reports [[{n},{k},{d}]].")
+                     f"Paper reports [[{n},{k},{d}]].",
+                dividers=(code.n // 2,),
+                block=dict(rows_x=code.L2, rows_z=code.L2,
+                           cols=[code.L2 + code.B - 1] * 2))
 
     if extras:
         for d in SURFACE_DISTANCES:
@@ -96,20 +113,29 @@ def build_catalog(layouts=(4, 6, 8, 10), directional: bool = True,
                 note=f"[[{d * d},1,{d}]]. Geometric, no product block "
                      f"structure.")
         for d in SURFACE_DISTANCES:
+            # HGP of two length-d repetition codes: n1 = n2 = d, m1 = m2 = d-1.
+            # H_X rows are indexed (a, j) and H_Z rows (i, b), so the two fold
+            # at different heights.
             add("unrotated surface", f"d={d}", *unrotated_surface_code(d),
                 note="Hypergraph product of two repetition codes; the dashed "
                      "line splits the two qubit sectors.",
-                dividers=(d * d,))
+                dividers=(d * d,),
+                block=dict(rows_x=d, rows_z=d - 1, cols=[d, d - 1]))
         for L in TORIC_SIZES:
             add("toric", f"L={L}", *toric_code(L),
                 note="Same blocks as unrotated, plus the wrap-around entries.",
-                dividers=(L * L,))
+                dividers=(L * L,),
+                block=dict(rows_x=L, rows_z=L, cols=[L, L]))
         for name, params in BB_CATALOG.items():
             add("bivariate bicycle", name,
                 *bb_code(params["l"], params["m"], params["A"], params["B"]),
                 note=f"l={params['l']}, m={params['m']}. "
                      f"H_X = [A|B], H_Z = [B^T|A^T].",
-                dividers=(params["l"] * params["m"],))
+                dividers=(params["l"] * params["m"],),
+                # idx = i*m + j, so a block is one m x m circulant and the
+                # blocks sit in an l x l grid.
+                block=dict(rows_x=params["m"], rows_z=params["m"],
+                           cols=[params["m"], params["m"]]))
 
     return entries
 

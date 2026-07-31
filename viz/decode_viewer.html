@@ -567,6 +567,53 @@ function drawMatrix() {
         pctx.fillRect(GUTTER + column * cell + pad, y, cell - 2 * pad, cell - 2 * pad));
     });
 
+    // Where the index arithmetic folds, drawn over the data so the blocks stay
+    // visible in it.  A fixed five-cell grid would cut across these.
+    if (geom.block) {
+      pctx.strokeStyle = colour('--text-muted');
+      pctx.lineWidth = 1;
+      pctx.beginPath();
+      const starts = [0].concat(geom.dividers);
+      starts.forEach((start, sector) => {
+        const end = sector + 1 < starts.length ? starts[sector + 1] : n;
+        const width = geom.block.cols[Math.min(sector, geom.block.cols.length - 1)];
+        for (let column = start; column <= end; column += width) {
+          const x = Math.round(GUTTER + column * cell) + .5;
+          pctx.moveTo(x, block.y0); pctx.lineTo(x, block.y0 + block.m * cell);
+        }
+      });
+      // Codes with a boundary list their truncated checks after the bulk, in
+      // a different loop order, so below that point the rows fold on their own
+      // period.  Ruling straight through would draw a grid the rows do not
+      // follow.
+      const stride = block.name === 'X' ? geom.block.rows_x : geom.block.rows_z;
+      const bulk = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
+      const limit = bulk === undefined ? block.m : Math.min(bulk, block.m);
+      for (let row = 0; row <= limit; row += stride) {
+        const y = Math.round(block.y0 + row * cell) + .5;
+        pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
+      }
+      if (bulk !== undefined && bulk < block.m) {
+        for (let row = bulk; row <= block.m; row += geom.block.rows_boundary) {
+          const y = Math.round(block.y0 + row * cell) + .5;
+          pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
+        }
+      }
+      pctx.stroke();
+
+      if (geom.block.bulk_x !== undefined) {   // where the bulk ends
+        const edge = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
+        if (edge < block.m) {
+          pctx.strokeStyle = colour('--text');
+          pctx.lineWidth = 2;
+          pctx.beginPath();
+          const y = Math.round(block.y0 + edge * cell) + .5;
+          pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
+          pctx.stroke();
+        }
+      }
+    }
+
     pctx.textAlign = 'right';
     pctx.fillStyle = muted;
     const rowStep = tickStep(13, cell);
@@ -684,19 +731,16 @@ function drawTanner() {
   // Four columns, one per half-step.  The message an edge carries names it;
   // sweep k's v->c is what the *previous* sweep left behind, or the prior on
   // the first one, so numbering the columns by iteration would lie.
+  const shown = +iterSlider.value;
   const layers = [];
-  if (sweeps[0]) {
-    layers.push({from: 'c', values: sweeps[0].to_check, iteration: sweeps[0].iteration,
-                 label: 'v→c (iter ' + sweeps[0].iteration + ')', direction: 'to_check'});
-    layers.push({from: 'v', values: sweeps[0].to_bit, iteration: sweeps[0].iteration,
-                 label: 'c→v (iter ' + sweeps[0].iteration + ')', direction: 'to_bit'});
-  }
-  if (sweeps[1]) {
-    layers.push({from: 'c', values: sweeps[1].to_check, iteration: sweeps[1].iteration,
-                 label: 'v→c (iter ' + sweeps[1].iteration + ')', direction: 'to_check'});
-    layers.push({from: 'v', values: sweeps[1].to_bit, iteration: sweeps[1].iteration,
-                 label: 'c→v (iter ' + sweeps[1].iteration + ')', direction: 'to_bit'});
-  }
+  [shown, shown + 1].forEach(iteration => {
+    const sweep = sweeps.find(step => step.iteration === iteration);
+    if (!sweep) return;
+    layers.push({from: 'c', values: sweep.to_check, iteration,
+                 label: 'v→c (iter ' + iteration + ')', direction: 'to_check'});
+    layers.push({from: 'v', values: sweep.to_bit, iteration,
+                 label: 'c→v (iter ' + iteration + ')', direction: 'to_bit'});
+  });
 
   const total = bp ? bp.trace.length : 0;
   document.getElementById('tannerIter').textContent =
@@ -798,9 +842,8 @@ function drawTanner() {
 
   // Each v-column carries the posterior of a different sweep: the one before
   // this window opened, then one per c->v layer that has gone by.
-  const first = sweeps[0].iteration;
   const llrForColumn = index => {
-    const iteration = first - 1 + Math.floor(index / 2);
+    const iteration = shown - 1 + Math.floor(index / 2);
     if (iteration < 1) {                   // nothing has been added yet
       return geom.qubits.map(() => Math.log((1 - +pSlider.value) / +pSlider.value));
     }
@@ -872,21 +915,27 @@ function pickTannerEdge(event) {
 function sayTannerEdge() {
   const out = document.getElementById('tannerReadout');
   if (!pickedEdge) { out.innerHTML = ''; return; }
-  const sweep = sweeps.find(step => step.iteration === pickedEdge.iteration);
-  if (!sweep) { out.textContent = ''; return; }
   const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(3);
+  // A c->v answer is built from what came in during the same sweep; a v->c
+  // message is built from the answers of the sweep *before* it.  Reading both
+  // off the same sweep is how the terms stopped adding up to the value shown.
+  const inputIteration = pickedEdge.direction === 'to_bit'
+    ? pickedEdge.iteration : pickedEdge.iteration - 1;
+  const sweep = sweeps.find(step => step.iteration === inputIteration);
   const contributions = [];
-  geom.edges.forEach(([check, qubit], edge) => {
-    const shares = pickedEdge.direction === 'to_bit'
-      ? check === pickedEdge.check : qubit === pickedEdge.qubit;
-    if (!shares) return;
-    const self = check === pickedEdge.check && qubit === pickedEdge.qubit;
-    const source = pickedEdge.direction === 'to_bit'
-      ? sweep.to_check[edge] : sweep.to_bit[edge];
-    contributions.push({label: (pickedEdge.direction === 'to_bit' ? 'v' : 'c') +
-                        (pickedEdge.direction === 'to_bit' ? qubit : check),
-                        value: source, self});
-  });
+  if (sweep) {
+    geom.edges.forEach(([check, qubit], edge) => {
+      const shares = pickedEdge.direction === 'to_bit'
+        ? check === pickedEdge.check : qubit === pickedEdge.qubit;
+      if (!shares) return;
+      const self = check === pickedEdge.check && qubit === pickedEdge.qubit;
+      const source = pickedEdge.direction === 'to_bit'
+        ? sweep.to_check[edge] : sweep.to_bit[edge];
+      contributions.push({label: (pickedEdge.direction === 'to_bit' ? 'v' : 'c') +
+                          (pickedEdge.direction === 'to_bit' ? qubit : check),
+                          value: source, self});
+    });
+  }
   const used = contributions.filter(term => !term.self);
   const own = contributions.find(term => term.self);
 
@@ -901,11 +950,16 @@ function sayTannerEdge() {
       ' — a c-node never repeats back what that v-node told it';
   } else {
     const prior = Math.log((1 - +pSlider.value) / +pSlider.value);
+    const terms = used.length
+      ? ' &nbsp;+&nbsp; ' +
+        used.map(term => term.label + ' ' + signed(term.value)).join(' &nbsp;+&nbsp; ')
+      : '';
     out.innerHTML =
       '<b>v' + pickedEdge.qubit + ' → c' + pickedEdge.check + '</b> at iteration ' +
       pickedEdge.iteration + ' &nbsp;=&nbsp; ' + signed(pickedEdge.value) +
-      '<br>prior ' + signed(prior) + ' &nbsp;+&nbsp; ' +
-      used.map(term => term.label + ' ' + signed(term.value)).join(' &nbsp;+&nbsp; ') +
+      '<br>prior ' + signed(prior) + terms +
+      (sweep ? ' &nbsp; (answers from iteration ' + inputIteration + ')'
+             : ' &nbsp; — the first sweep sends the prior, nothing has come back yet') +
       '<br>not used: ' + (own ? own.label + ' ' + signed(own.value) : '—') +
       ' — the answer this edge is replying to';
   }
@@ -965,12 +1019,13 @@ async function fetchMessages() {
     body: JSON.stringify({id: geom.id, syndrome: [...syndromeSet],
                           p: +pSlider.value, max_iter: +maxIter.value,
                           method: methodSelect.value,
-                          iteration: +iterSlider.value, count: 2})
+                          iteration: Math.max(1, +iterSlider.value - 1),
+                          count: +iterSlider.value === 1 ? 2 : 3})
   });
   if (token !== pending) return;
   const window = await response.json();
   sweeps = window.steps;
-  messages = sweeps[0] || null;
+  messages = sweeps.find(step => step.iteration === +iterSlider.value) || null;
   // The slider may have moved the window off the picked edge's sweep; drop the
   // selection rather than explaining a value that is no longer on screen.
   if (pickedEdge &&

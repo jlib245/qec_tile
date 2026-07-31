@@ -97,6 +97,41 @@ def test_payload_cannot_close_the_script_tag():
     assert html.count("</script>") == template.count("</script>")
 
 
+def test_payload_carries_the_block_shape(code):
+    """Absent by default: a code with no repeating block must not get lines."""
+    plain = pcm_viewer.matrix_payload("x", code.HX, code.HZ)
+    assert plain["block"] is None
+    shaped = pcm_viewer.matrix_payload("x", code.HX, code.HZ,
+                                       block=dict(rows_x=3, rows_z=3,
+                                                  cols=[5, 5]))
+    assert shaped["block"] == dict(rows_x=3, rows_z=3, cols=[5, 5])
+
+
+def test_catalog_block_shapes_match_the_construction():
+    """Where the index arithmetic folds, and it is not the same on both axes.
+
+    Rows count checks and columns count qubits, so a tile's block is
+    L2 x (L2+B-1) -- the qubit lattice is B-1 wider than the anchor grid.  An
+    HGP splits differently again: H_X rows are indexed (a, j) and H_Z rows
+    (i, b), so the two matrices fold at different heights -- d=5 is the case
+    where all four numbers are not the same, so an axis mix-up shows.
+    """
+    entries = {(entry["group"], entry["param"]): entry
+               for entry in pcm_viewer.build_catalog(layouts=(4,))}
+
+    tile = entries[("tile b3w6", "L=4")]
+    assert tile["block"] == dict(rows_x=4, rows_z=4, cols=[6, 6])
+    assert tile["dividers"] == [tile["n"] // 2]
+
+    bb = entries[("bivariate bicycle", "[[72,12,6]]")]
+    assert bb["block"] == dict(rows_x=6, rows_z=6, cols=[6, 6])
+
+    unrotated = entries[("unrotated surface", "d=5")]
+    assert unrotated["block"] == dict(rows_x=5, rows_z=4, cols=[5, 4])
+
+    assert entries[("rotated surface", "d=3")]["block"] is None
+
+
 def test_catalog_labels_are_unique():
     """Colliding (group, param) pairs would stack up in the viewer's select."""
     keys = [(entry["group"], entry["param"])

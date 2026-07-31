@@ -119,6 +119,21 @@ function tickStep(px, cell) {
   return 500;
 }
 
+// Where the heavy vertical lines go.  Each sector folds by its own width, so
+// the rules restart at every divider instead of marching across it.
+function columnRules(entry) {
+  const rules = [];
+  const starts = [0].concat(entry.dividers);
+  const widths = entry.block ? entry.block.cols : starts.map(() => 5);
+  starts.forEach((start, sector) => {
+    const end = sector + 1 < starts.length ? starts[sector + 1] : entry.n;
+    const width = widths[Math.min(sector, widths.length - 1)] || 5;
+    for (let col = start; col <= end; col += width) rules.push(col);
+  });
+  rules.push(entry.n);
+  return rules;
+}
+
 const brief = list => list.length > 12
   ? list.slice(0, 12).join(', ') + ', … (' + list.length + ')'
   : (list.length ? list.join(', ') : '—');
@@ -214,7 +229,7 @@ function draw() {
         ctx.fillRect(GUTTER, block.y0 + selected.row * cell, entry.n * cell, cell);
       }
     }
-    if (cell >= 5) {
+    if (cell >= 5) {                       // one line per cell, only if it fits
       ctx.lineWidth = 1;
       ctx.strokeStyle = line;
       ctx.beginPath();
@@ -227,19 +242,7 @@ function draw() {
         ctx.moveTo(GUTTER, y); ctx.lineTo(GUTTER + entry.n * cell, y);
       }
       ctx.stroke();
-      ctx.strokeStyle = strong;
-      ctx.beginPath();
-      for (let col = 0; col <= entry.n; col += 5) {
-        const x = Math.round(GUTTER + col * cell) + .5;
-        ctx.moveTo(x, block.y0); ctx.lineTo(x, block.y0 + block.m * cell);
-      }
-      for (let row = 0; row <= block.m; row += 5) {
-        const y = Math.round(block.y0 + row * cell) + .5;
-        ctx.moveTo(GUTTER, y); ctx.lineTo(GUTTER + entry.n * cell, y);
-      }
-      ctx.stroke();
     }
-
     const pad = cell >= 7 ? 1 : 0;
     ctx.fillStyle = block.color;
     block.rows.forEach((row, i) => {
@@ -247,6 +250,25 @@ function draw() {
       row.forEach(col =>
         ctx.fillRect(GUTTER + col * cell + pad, y, cell - 2 * pad, cell - 2 * pad));
     });
+
+    // Block rules last, so they sit on top of the data rather than under it,
+    // and on the code's own period rather than an arbitrary five: a grid that
+    // disagrees with the block size hides the structure it should show.  Drawn
+    // at any cell size — on a big code they are the only structure left.
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = strong;
+    ctx.beginPath();
+    columnRules(entry).forEach(col => {
+      const x = Math.round(GUTTER + col * cell) + .5;
+      ctx.moveTo(x, block.y0); ctx.lineTo(x, block.y0 + block.m * cell);
+    });
+    const rowStride = entry.block
+      ? (block.name === 'X' ? entry.block.rows_x : entry.block.rows_z) : 5;
+    for (let row = 0; row <= block.m; row += rowStride) {
+      const y = Math.round(block.y0 + row * cell) + .5;
+      ctx.moveTo(GUTTER, y); ctx.lineTo(GUTTER + entry.n * cell, y);
+    }
+    ctx.stroke();
 
     ctx.textAlign = 'right';
     ctx.fillStyle = muted;

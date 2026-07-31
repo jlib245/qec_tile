@@ -63,6 +63,11 @@ class CodeView:
     # centroid of the support does.  None means "work it out from the support".
     x_points: list[tuple[float, float]] | None = None
     z_points: list[tuple[float, float]] | None = None
+    # Where the index arithmetic folds: {"rows_x", "rows_z", "cols"} with one
+    # column width per sector, and the sector boundaries themselves.  None for
+    # a code built geometrically, which has no such period.
+    block: dict | None = None
+    dividers: tuple[int, ...] = ()
     # (period_x, period_y) for a layout that wraps, so the page can draw the
     # neighbouring copies instead of long lines across the picture.
     period: tuple[float, float] | None = None
@@ -77,7 +82,7 @@ class CodeView:
 
 
 def _view(label: str, HX, HZ, points, x_points=None, z_points=None,
-          period=None) -> CodeView:
+          period=None, block=None, dividers=()) -> CodeView:
     """Attach logicals to a code that only came with its two check matrices."""
     HX = np.asarray(HX, dtype=np.uint8)
     HZ = np.asarray(HZ, dtype=np.uint8)
@@ -91,7 +96,8 @@ def _view(label: str, HX, HZ, points, x_points=None, z_points=None,
     return CodeView(label, HX, HZ, list(points),
                     quotient_basis(HX, nullspace2(HZ)),
                     quotient_basis(HZ, nullspace2(HX)),
-                    x_points=x_points, z_points=z_points, period=period)
+                    x_points=x_points, z_points=z_points, period=period,
+                    block=block, dividers=tuple(dividers))
 
 
 def _view_tile(label: str, code) -> CodeView:
@@ -107,9 +113,21 @@ def _view_tile(label: str, code) -> CodeView:
     points = [(EDGE_H, x + 0.5, float(y)) if orient == "H"
               else (EDGE_V, float(x), y + 0.5)
               for orient, x, y in code.qubits]
+    # Anchors fold every L2 rows, qubits every L2+B-1 columns; the H and V
+    # sectors have the same shape.  Boundary anchors are appended after the
+    # bulk and do not follow that fold -- the mismatch is where they start.
+    # The boundary anchors are listed after the bulk and in the other loop
+    # order -- j outer, the 2(B-1) off-lattice x values inner -- so below the
+    # bulk the rows fold every 2(B-1) instead of every L2.
+    bulk = code.L1 * code.L2
     return CodeView(label, code.HX, code.HZ, points, *code.logicals(),
                     x_points=[(float(x), float(y)) for x, y in code.x_anchors],
-                    z_points=[(float(x), float(y)) for x, y in code.z_anchors])
+                    z_points=[(float(x), float(y)) for x, y in code.z_anchors],
+                    block=dict(rows_x=code.L2, rows_z=code.L2,
+                               cols=[code.L2 + code.B - 1] * 2,
+                               bulk_x=bulk, bulk_z=bulk,
+                               rows_boundary=2 * (code.B - 1)),
+                    dividers=(code.n // 2,))
 
 
 def _view_rotated_surface(label: str, d: int) -> CodeView:
@@ -139,7 +157,11 @@ def _view_hgp(label: str, H1, H2, period=None) -> CodeView:
     # middle of the lattice, nowhere near either.
     x_points = [(float(j), a + 0.5) for a in range(m1) for j in range(n2)]
     z_points = [(b + 0.5, float(i)) for i in range(n1) for b in range(m2)]
-    return _view(label, HX, HZ, points, x_points, z_points, period)
+    # H_X rows are indexed (a, j) and H_Z rows (i, b), so the two matrices fold
+    # at different heights; the two qubit sectors have different widths too.
+    return _view(label, HX, HZ, points, x_points, z_points, period,
+                 block=dict(rows_x=n2, rows_z=m2, cols=[n2, m2]),
+                 dividers=(n1 * n2,))
 
 
 def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
@@ -158,7 +180,11 @@ def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
     x_points = [(j + 0.5, float(i)) for i in range(l) for j in range(m)]
     z_points = [(float(j), i + 0.5) for i in range(l) for j in range(m)]
     return _view(label, HX, HZ, left + right, x_points, z_points,
-                 period=(float(m), float(l)))
+                 period=(float(m), float(l)),
+                 # idx = i*m + j: one block is an m x m circulant, and the
+                 # blocks sit in an l x l grid.
+                 block=dict(rows_x=m, rows_z=m, cols=[m, m]),
+                 dividers=(l * m,))
 
 
 # Small enough that BP+OSD answers within a click and the layout still reads
@@ -239,6 +265,8 @@ def geometry(code_id: str) -> dict:
     return dict(
         id=code_id, label=view.label, n=view.n, k=view.k,
         period=list(view.period) if view.period else None,
+        block=view.block,
+        dividers=[int(divider) for divider in view.dividers],
         qubits=[dict(shape=shape, x=x, y=y) for shape, x, y in view.points],
         x_checks=[np.flatnonzero(row).tolist() for row in view.HX],
         z_checks=[np.flatnonzero(row).tolist() for row in view.HZ],
