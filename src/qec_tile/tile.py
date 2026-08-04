@@ -23,13 +23,18 @@ A tile is a subset of those. Condition (T2) fixes the Z-tile from the X-tile
 
 Layout
 ------
-Anchors sit at their box's lower-left corner; with bulk block ``L1 x L2``::
+Anchors sit at their box's lower-left corner.  With bulk block ``L1 x L2``
+each type sweeps one rectangle, running ``B-1`` past the lattice on the axis
+its boxes hang off::
 
-    bulk       (X and Z):  i in [0, L1),                    j in [0, L2)
-    x_boundary (X only):   i in [0, L1),                    j in [-(B-1), 0) u [L2, L2+B-1)
-    z_boundary (Z only):   i in [-(B-1), 0) u [L1, L1+B-1), j in [0, L2)
+    X anchors:  i in [0, L1),                   j in [-(B-1), L2+B-1)
+    Z anchors:  i in [-(B-1), L1+B-1),          j in [0, L2)
 
-The paper's figures color these black, red and blue respectively.
+The paper's figures color the ones inside ``[0,L1) x [0,L2)`` black and the
+overhanging ones red (X) and blue (Z).  They are not enumerated separately:
+one sweep with ``j`` innermost keeps consecutive checks overlapping on the
+lattice, which a bulk pass followed by a boundary pass would break at the
+seam.
 
 The anchor sets above are the paper's (unrotated) square layout.  The qubit
 set is built as a literal union of boxes, so swapping in another bulk layout
@@ -37,9 +42,9 @@ only means changing those three lists.
 
 Qubits are the union of the boxes over bulk anchors only, so bulk tiles are
 never truncated while the boundary tiles hang off the lattice and get cut.
-What an x_boundary tile loses is always out of range in ``y`` and what a
-z_boundary tile loses is out of range in ``x``, so a cut qubit never sits in a
-tile of the opposite type — the (T2) overlap parity survives truncation.
+What an overhanging X tile loses is always out of range in ``y`` and what an
+overhanging Z tile loses is out of range in ``x``, so a cut qubit never sits in
+a tile of the opposite type — the (T2) overlap parity survives truncation.
 
 Hence ``n = 2*(L1+B-1)*(L2+B-1)``, and every check is independent so
 ``k = 2*(B-1)**2`` whatever the layout size.
@@ -116,11 +121,17 @@ def build_tile_code(x_h, x_v, B: int, L1: int, L2: int) -> TileCode:
     x_tile = [("H", x, y) for x, y in x_h] + [("V", x, y) for x, y in x_v]
     z_tile = [("H", x, y) for x, y in z_h] + [("V", x, y) for x, y in z_v]
 
-    bulk = [(i, j) for i in range(L1) for j in range(L2)]
-    x_boundary = [(i, j) for i in range(L1)
-                  for j in [*range(-(B - 1), 0), *range(L2, L2 + B - 1)]]
-    z_boundary = [(i, j) for j in range(L2)
-                  for i in [*range(-(B - 1), 0), *range(L1, L1 + B - 1)]]
+    # One sweep per type, j innermost.  Qubit columns run x-major, so a step
+    # in j shifts a check's support by one column and a step in i by a whole
+    # lattice column; sweeping this way makes consecutive checks overlap on
+    # the lattice instead of jumping across it.  Bulk and boundary anchors are
+    # not separate passes -- an X anchor simply runs B-1 past the lattice in j
+    # and a Z anchor in i, so each set is one rectangle.
+    x_anchors_all = [(i, j) for i in range(L1)
+                     for j in range(-(B - 1), L2 + B - 1)]
+    z_anchors_all = [(i, j) for i in range(-(B - 1), L1 + B - 1)
+                     for j in range(L2)]
+    bulk = [(i, j) for i in range(L1) for j in range(L2)]   # qubits come from these
 
     # Qubits are the union of the bulk anchors' B x B boxes.  For the square
     # layout that union is the rectangle [0, L1+B-1) x [0, L2+B-1), but taking
@@ -147,8 +158,8 @@ def build_tile_code(x_h, x_v, B: int, L1: int, L2: int) -> TileCode:
         return (np.array(checks, dtype=np.uint8) if checks
                 else np.zeros((0, len(qubits)), dtype=np.uint8)), kept_anchors
 
-    HX, x_anchors = assemble(x_tile, bulk + x_boundary)
-    HZ, z_anchors = assemble(z_tile, bulk + z_boundary)
+    HX, x_anchors = assemble(x_tile, x_anchors_all)
+    HZ, z_anchors = assemble(z_tile, z_anchors_all)
 
     # Paper's final pass: a qubit no X-check (or no Z-check) touches leaves no
     # syndrome, so it is dropped; then the checks that are now empty go too.

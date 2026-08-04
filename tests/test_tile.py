@@ -31,6 +31,31 @@ def test_qubits_are_the_union_of_bulk_boxes(B, x_h, x_v, L1, L2):
     assert set(c.qubits) == union
 
 
+def test_anchors_are_enumerated_by_one_rule():
+    """One sweep in (i, j) order, with no bulk-then-boundary split.
+
+    Qubit columns run x-major, so a step in j shifts a check's support by one
+    column and a step in i by a whole lattice column: enumerating anchors with
+    j innermost is what makes consecutive checks overlap instead of jumping
+    across the matrix.  Splitting the sweep into a bulk pass and a boundary
+    pass broke that at the seam -- HZ's boundary rows stepped +0, +37, +7, -43
+    on b3w6 L=5 against +1, +1, +1 for the bulk.
+    """
+    code = build_tile_code(*B3W6, 3, 5, 5)
+    assert code.x_anchors == sorted(code.x_anchors)
+    assert code.z_anchors == sorted(code.z_anchors)
+
+
+def test_anchor_sets_are_the_paper_rectangles():
+    """X anchors run past the lattice in j, Z anchors in i, by B-1 each way."""
+    B, L1, L2 = 3, 5, 4
+    code = build_tile_code(*B3W6, B, L1, L2)
+    assert set(code.x_anchors) == {(i, j) for i in range(L1)
+                                   for j in range(-(B - 1), L2 + B - 1)}
+    assert set(code.z_anchors) == {(i, j) for i in range(-(B - 1), L1 + B - 1)
+                                   for j in range(L2)}
+
+
 def test_stabilizers_commute():
     c = build_tile_code(*B3W6, 3, 5, 5)
     assert not ((c.HX @ c.HZ.T) % 2).any()
