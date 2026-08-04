@@ -25,6 +25,7 @@ Run it (fastapi and uvicorn are in the dev dependency group):
 # models defined inside create_app() do not exist -- the body silently becomes a
 # query parameter and every POST answers 422.
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -113,21 +114,43 @@ def _view_tile(label: str, code) -> CodeView:
     points = [(EDGE_H, x + 0.5, float(y)) if orient == "H"
               else (EDGE_V, float(x), y + 0.5)
               for orient, x, y in code.qubits]
-    # Anchors fold every L2 rows, qubits every L2+B-1 columns; the H and V
-    # sectors have the same shape.  Boundary anchors are appended after the
-    # bulk and do not follow that fold -- the mismatch is where they start.
-    # The boundary anchors are listed after the bulk and in the other loop
-    # order -- j outer, the 2(B-1) off-lattice x values inner -- so below the
-    # bulk the rows fold every 2(B-1) instead of every L2.
-    bulk = code.L1 * code.L2
+    # Everything below is counted, never derived.  Pruning drops the qubits no
+    # check of one type touches and then the checks left empty, so on a
+    # directional code L1*L2 rows, L2+B-1 columns and an n/2 sector boundary
+    # are all wrong -- one word loses half its bulk X-checks and splits 45/60
+    # instead of down the middle.
+    def bulk_rows(anchors):
+        inside = [0 <= x < code.L1 and 0 <= y < code.L2 for x, y in anchors]
+        return inside.index(False) if False in inside else len(inside)
+
+    def sector_width(orient):
+        """Qubits per lattice column, or None if the columns are uneven."""
+        counts = Counter(x for shape, x, _y in code.qubits if shape == orient)
+        widths = set(counts.values())
+        return widths.pop() if len(widths) == 1 else None
+
+    widths = [sector_width("H"), sector_width("V")]
+    horizontal = sum(1 for shape, _x, _y in code.qubits if shape == "H")
     return CodeView(label, code.HX, code.HZ, points, *code.logicals(),
                     x_points=[(float(x), float(y)) for x, y in code.x_anchors],
                     z_points=[(float(x), float(y)) for x, y in code.z_anchors],
-                    block=dict(rows_x=code.L2, rows_z=code.L2,
-                               cols=[code.L2 + code.B - 1] * 2,
-                               bulk_x=bulk, bulk_z=bulk,
-                               rows_boundary=2 * (code.B - 1)),
-                    dividers=(code.n // 2,))
+                    block=None if not all(widths) else dict(
+                        rows_x=code.L2, rows_z=code.L2,
+                        cols=widths,
+                        bulk_x=bulk_rows(code.x_anchors),
+                        bulk_z=bulk_rows(code.z_anchors),
+                        rows_boundary=2 * (code.B - 1),
+                        note=(
+                            f"rows fold every L2 = {code.L2} (anchors per "
+                            f"lattice column); columns every {widths[0]} in "
+                            f"the H sector and {widths[1]} in the V sector "
+                            f"(qubits left per lattice column after pruning, "
+                            f"against L2+B-1 = {code.L2 + code.B - 1}). Bulk "
+                            f"runs to row {bulk_rows(code.z_anchors)}; below "
+                            f"it the truncated boundary checks step along the "
+                            f"other axis, one column per 2(B-1) = "
+                            f"{2 * (code.B - 1)} rows.")),
+                    dividers=(horizontal,))
 
 
 def _view_rotated_surface(label: str, d: int) -> CodeView:
@@ -160,7 +183,14 @@ def _view_hgp(label: str, H1, H2, period=None) -> CodeView:
     # H_X rows are indexed (a, j) and H_Z rows (i, b), so the two matrices fold
     # at different heights; the two qubit sectors have different widths too.
     return _view(label, HX, HZ, points, x_points, z_points, period,
-                 block=dict(rows_x=n2, rows_z=m2, cols=[n2, m2]),
+                 block=dict(rows_x=n2, rows_z=m2, cols=[n2, m2],
+                            note=(
+                                f"H_X rows are indexed (a, j) so they fold "
+                                f"every n2 = {n2}; H_Z rows are (i, b) and "
+                                f"fold every m2 = {m2}. The qubit sectors are "
+                                f"n1xn2 = {n1}x{n2} then m1xm2 = {m1}x{m2}, "
+                                f"so the column period changes at the "
+                                f"divider.")),
                  dividers=(n1 * n2,))
 
 
@@ -183,7 +213,13 @@ def _view_bb(label: str, l: int, m: int, A_terms, B_terms) -> CodeView:
                  period=(float(m), float(l)),
                  # idx = i*m + j: one block is an m x m circulant, and the
                  # blocks sit in an l x l grid.
-                 block=dict(rows_x=m, rows_z=m, cols=[m, m]),
+                 block=dict(rows_x=m, rows_z=m, cols=[m, m],
+                            note=(
+                                f"idx = i*m + j with l = {l}, m = {m}: one "
+                                f"block is an mxm = {m}x{m} circulant (the y "
+                                f"shift) and the blocks sit in an lxl = "
+                                f"{l}x{l} grid (the x shift). Both halves of "
+                                f"[A|B] fold the same way.")),
                  dividers=(l * m,))
 
 

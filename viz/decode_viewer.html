@@ -134,6 +134,7 @@ so a stalled run means no correction at all.</p>
     <div id="matrixPane" style="background:var(--surface-1);border-radius:12px;padding:10px;overflow:auto">
       <canvas id="pcm" role="img" aria-label="parity check matrix"></canvas>
     </div>
+    <div id="matrixNote" style="font-size:12.5px;color:var(--text-secondary);margin:10px 0 0;line-height:1.6"></div>
     <div id="matrixReadout" style="font-family:var(--font-mono);font-size:12.5px;color:var(--text-secondary);margin:10px 0 0;min-height:40px;line-height:1.65"></div>
   </div>
 
@@ -573,31 +574,26 @@ function drawMatrix() {
       pctx.strokeStyle = colour('--text-muted');
       pctx.lineWidth = 1;
       pctx.beginPath();
+      // Only over the bulk.  The truncated checks below it march along the
+      // other lattice axis -- one column per group of 2(B-1) rows -- so no
+      // ruling at the bulk's period describes them, and drawing one there
+      // reads as a grid that failed to line up.
+      const stride = block.name === 'X' ? geom.block.rows_x : geom.block.rows_z;
+      const bulk = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
+      const limit = bulk === undefined ? block.m : Math.min(bulk, block.m);
+      const bottom = block.y0 + limit * cell;
       const starts = [0].concat(geom.dividers);
       starts.forEach((start, sector) => {
         const end = sector + 1 < starts.length ? starts[sector + 1] : n;
         const width = geom.block.cols[Math.min(sector, geom.block.cols.length - 1)];
         for (let column = start; column <= end; column += width) {
           const x = Math.round(GUTTER + column * cell) + .5;
-          pctx.moveTo(x, block.y0); pctx.lineTo(x, block.y0 + block.m * cell);
+          pctx.moveTo(x, block.y0); pctx.lineTo(x, bottom);
         }
       });
-      // Codes with a boundary list their truncated checks after the bulk, in
-      // a different loop order, so below that point the rows fold on their own
-      // period.  Ruling straight through would draw a grid the rows do not
-      // follow.
-      const stride = block.name === 'X' ? geom.block.rows_x : geom.block.rows_z;
-      const bulk = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
-      const limit = bulk === undefined ? block.m : Math.min(bulk, block.m);
       for (let row = 0; row <= limit; row += stride) {
         const y = Math.round(block.y0 + row * cell) + .5;
         pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
-      }
-      if (bulk !== undefined && bulk < block.m) {
-        for (let row = bulk; row <= block.m; row += geom.block.rows_boundary) {
-          const y = Math.round(block.y0 + row * cell) + .5;
-          pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
-        }
       }
       pctx.stroke();
 
@@ -665,6 +661,13 @@ function drawMatrix() {
     blocks.forEach(block => pctx.strokeRect(GUTTER + matrixHover * cell + .5,
                                             block.y0 + .5, cell, block.m * cell));
   }
+
+  // Where the block size came from, in the code's own parameters.
+  document.getElementById('matrixNote').textContent =
+    geom.block && geom.block.note
+      ? 'block ' + geom.block.rows_x + ' x ' + geom.block.cols[0] + ' — ' +
+        geom.block.note
+      : 'no repeating block: this code is laid out geometrically';
 
   document.getElementById('matrixHint').textContent = cell >= 5
     ? 'click a column to flip that qubit, or a row number to light that check'
