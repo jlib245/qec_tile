@@ -225,19 +225,29 @@ def rotated_surface_code(d):
     idx = lambda i, j: i * d + j
     X, Z = [], []
 
+    # 각 타입을 한 번에 훑되 경계 체크를 자기 줄 안, 자기 j 자리에 넣는다.
+    # 뒤에 몰아 붙이면 행이 격자 순서를 벗어나 PCM의 밴드가 그 지점에서 끊긴다.
+    # X는 줄(i)마다 왼쪽(j=0) 또는 오른쪽(j=d-1) 경계를 하나씩 갖고, Z는 열(j)
+    # 마다 위(i=0) 또는 아래(i=d-1)를 하나씩 가지므로 그룹 크기가 균일해진다.
     for i in range(d - 1):
+        if i % 2:                                # 왼쪽 경계는 j=0
+            X.append([idx(i, 0), idx(i + 1, 0)])
         for j in range(d - 1):
-            sup = [idx(i, j), idx(i, j + 1), idx(i + 1, j), idx(i + 1, j + 1)]
-            (X if (i + j) % 2 == 0 else Z).append(sup)
+            if (i + j) % 2 == 0:
+                X.append([idx(i, j), idx(i, j + 1),
+                          idx(i + 1, j), idx(i + 1, j + 1)])
+        if i % 2 == 0:                           # 오른쪽 경계는 j=d-1
+            X.append([idx(i, d - 1), idx(i + 1, d - 1)])
 
-    for j in range(0, d - 1, 2):                 # top, Z
-        Z.append([idx(0, j), idx(0, j + 1)])
-    for j in range(1, d - 1, 2):                 # bottom, Z
-        Z.append([idx(d - 1, j), idx(d - 1, j + 1)])
-    for i in range(1, d - 1, 2):                 # left, X
-        X.append([idx(i, 0), idx(i + 1, 0)])
-    for i in range(0, d - 1, 2):                 # right, X
-        X.append([idx(i, d - 1), idx(i + 1, d - 1)])
+    for j in range(d - 1):
+        if j % 2 == 0:                           # 위 경계는 i=0
+            Z.append([idx(0, j), idx(0, j + 1)])
+        for i in range(d - 1):
+            if (i + j) % 2:
+                Z.append([idx(i, j), idx(i, j + 1),
+                          idx(i + 1, j), idx(i + 1, j + 1)])
+        if j % 2:                                # 아래 경계는 i=d-1
+            Z.append([idx(d - 1, j), idx(d - 1, j + 1)])
 
     def to_mat(rows):
         M = np.zeros((len(rows), n), dtype=np.uint8)

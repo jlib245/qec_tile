@@ -88,14 +88,17 @@ def build_catalog(layouts=(4, 6, 8, 10), directional: bool = True,
         B = 3 if name.startswith("b3") else 4
         for L in layouts:
             code = paper_code(name, L, L)
-            # Anchors fold every L2 rows, qubits every L2+B-1 columns: the
-            # qubit lattice is B-1 wider than the anchor grid.  The H and V
-            # sectors have the same shape, so both widths are the same.
+            # Anchors are swept in one pass with j innermost, so a row block is
+            # the anchors sharing an i: X sweeps j over [-(B-1), L2+B-1) and Z
+            # over [0, L2), which is why the two fold at different heights.
+            # Columns fold every L2+B-1 -- the qubit lattice is B-1 wider than
+            # the anchor grid -- and the H and V sectors have the same shape.
             add(f"tile {name}", f"L={L}", code.HX, code.HZ,
                 note=f"Tile {name} on {L}x{L} bulk anchors. "
                      f"Short rows are boundary tiles cut by the lattice edge.",
                 dividers=(code.n // 2,),
-                block=dict(rows_x=L, rows_z=L, cols=[L + B - 1, L + B - 1]))
+                block=dict(rows_x=L + 2 * (B - 1), rows_z=L,
+                           cols=[L + B - 1, L + B - 1]))
 
     if directional:
         for word, M, N, n, k, d in PAPER_CODES:
@@ -104,14 +107,18 @@ def build_catalog(layouts=(4, 6, 8, 10), directional: bool = True,
                 note=f"Compass walk {word} on an {M}x{N} anchor grid. "
                      f"Paper reports [[{n},{k},{d}]].",
                 dividers=(code.n // 2,),
-                block=dict(rows_x=code.L2, rows_z=code.L2,
+                block=dict(rows_x=code.L2 + 2 * (code.B - 1), rows_z=code.L2,
                            cols=[code.L2 + code.B - 1] * 2))
 
     if extras:
         for d in SURFACE_DISTANCES:
+            # Faces sit on a checkerboard, so a lattice row carries (d-1)/2 of
+            # them plus the one weight-2 check on the side its parity puts it.
             add("rotated surface", f"d={d}", *rotated_surface_code(d),
-                note=f"[[{d * d},1,{d}]]. Geometric, no product block "
-                     f"structure.")
+                note=f"[[{d * d},1,{d}]]. Faces on a checkerboard: within a "
+                     f"row the support steps two columns at a time.",
+                block=dict(rows_x=(d - 1) // 2 + 1, rows_z=(d - 1) // 2 + 1,
+                           cols=[d]))
         for d in SURFACE_DISTANCES:
             # HGP of two length-d repetition codes: n1 = n2 = d, m1 = m2 = d-1.
             # H_X rows are indexed (a, j) and H_Z rows (i, b), so the two fold

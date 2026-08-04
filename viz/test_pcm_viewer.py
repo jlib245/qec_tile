@@ -119,8 +119,10 @@ def test_catalog_block_shapes_match_the_construction():
     entries = {(entry["group"], entry["param"]): entry
                for entry in pcm_viewer.build_catalog(layouts=(4,))}
 
+    # X anchors sweep j over [-(B-1), L2+B-1) and Z anchors over [0, L2), so
+    # the two matrices fold at different heights: 4+2*2 = 8 against 4.
     tile = entries[("tile b3w6", "L=4")]
-    assert tile["block"] == dict(rows_x=4, rows_z=4, cols=[6, 6])
+    assert tile["block"] == dict(rows_x=8, rows_z=4, cols=[6, 6])
     assert tile["dividers"] == [tile["n"] // 2]
 
     bb = entries[("bivariate bicycle", "[[72,12,6]]")]
@@ -129,7 +131,33 @@ def test_catalog_block_shapes_match_the_construction():
     unrotated = entries[("unrotated surface", "d=5")]
     assert unrotated["block"] == dict(rows_x=5, rows_z=4, cols=[5, 4])
 
-    assert entries[("rotated surface", "d=3")]["block"] is None
+    # A lattice row of the rotated code: (d-1)/2 faces plus one boundary check.
+    assert entries[("rotated surface", "d=5")]["block"] == \
+        dict(rows_x=3, rows_z=3, cols=[5])
+
+
+def test_rotated_surface_checks_are_one_sweep():
+    """Each lattice row carries its faces and its own boundary check.
+
+    The faces of a rotated code sit on a checkerboard, so within a row the
+    support steps two columns at a time; the weight-2 boundary check belongs to
+    that same row and is emitted in its j order rather than appended at the
+    end.  That makes every row block the same height -- (d-1)/2 faces plus one
+    -- which is what lets the viewer rule a grid at all.
+    """
+    import numpy as np
+    from qec_pem import rotated_surface_code
+
+    d = 7
+    HX, _HZ = rotated_surface_code(d)
+    group = (d - 1) // 2 + 1
+    assert HX.shape[0] == (d - 1) * group
+
+    for start in range(0, HX.shape[0], group):
+        rows = HX[start:start + group]
+        firsts = [int(np.flatnonzero(row)[0]) for row in rows]
+        assert firsts == sorted(firsts), (start, firsts)
+        assert sorted(int(row.sum()) for row in rows) == [2] + [4] * (group - 1)
 
 
 def test_catalog_labels_are_unique():
