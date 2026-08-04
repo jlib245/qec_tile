@@ -81,6 +81,7 @@ so a stalled run means no correction at all.</p>
   <button id="sample" type="button">Random shot</button>
   <button id="clear" type="button">Clear</button>
   <label><input type="checkbox" id="showChecks"> show X-checks</label>
+  <label><input type="checkbox" id="showGhosts" checked> show pruned</label>
 </div>
 
 <div class="controls">
@@ -103,6 +104,8 @@ so a stalled run means no correction at all.</p>
       <span class="item"><span class="swatch" style="background:var(--residual)"></span>residual e⊕ê</span>
       <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;background:var(--lit)"></span>c-node, lit</span>
       <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;border:1.5px solid var(--idle)"></span>c-node, quiet</span>
+      <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;border:1.5px dashed var(--text-muted);opacity:.6"></span>pruned qubit</span>
+      <span class="item"><span class="swatch" style="width:10px;height:10px;border-radius:1px;border:1.5px dashed var(--text-muted);opacity:.6;background:linear-gradient(45deg,transparent 45%,var(--text-muted) 45%,var(--text-muted) 55%,transparent 55%)"></span>pruned c-node</span>
       <span class="item"><span class="dot" style="background:rgba(224,57,62,.15)"></span>→<span class="dot" style="background:rgba(224,57,62,.9)"></span>P(error) from BP</span>
       <span class="item"><span class="dot" style="border:1.5px solid var(--lit)"></span>BP's guess (P &gt; 0.5)</span>
     </div>
@@ -160,6 +163,9 @@ const maxIter = document.getElementById('maxIter');
 const maxIterOut = document.getElementById('maxIterOut');
 const pSlider = document.getElementById('p'), pOut = document.getElementById('pOut');
 const showChecks = document.getElementById('showChecks');
+const showGhosts = document.getElementById('showGhosts');
+// With pruned things hidden the matrix closes up: index is slot again.
+const usingSlots = () => showGhosts.checked && geom && geom.slots;
 const statusLine = document.getElementById('status');
 
 const showBelief = document.getElementById('showBelief');
@@ -274,6 +280,39 @@ function placeChecks() {
   const taken = new Set(geom.qubits.map(qubit => qubit.x + ':' + qubit.y));
   geom.z_draw = geom.z_centres.map(([x, y]) =>
     taken.has(x + ':' + y) ? [x + 0.22, y + 0.22] : [x, y]);
+
+  // Slot -> index, for reading a click on the matrix back to a qubit or check.
+  const invert = list => {
+    const back = new Map();
+    list.forEach((slot, index) => back.set(slot, index));
+    return back;
+  };
+  geom.columnOf = geom.slots ? invert(geom.slots.columns) : null;
+  geom.xRowOf = geom.slots ? invert(geom.slots.x_rows) : null;
+  geom.zRowOf = geom.slots ? invert(geom.slots.z_rows) : null;
+
+  // Ghosts hidden: the same order with the empty places closed up, so the
+  // toggle folds the gaps instead of rearranging the matrix.
+  const closeUp = slots => {
+    const place = new Map([...slots].sort((a, b) => a - b)
+                                    .map((slot, index) => [slot, index]));
+    return slots.map(slot => place.get(slot));
+  };
+  geom.dense = geom.slots ? {
+    columns: closeUp(geom.slots.columns),
+    x_rows: closeUp(geom.slots.x_rows),
+    z_rows: closeUp(geom.slots.z_rows),
+    // The sector split survives the fold; a period does not.
+    dividers: (geom.slots.dividers || []).map(
+      divider => geom.slots.columns.filter(slot => slot < divider).length),
+  } : null;
+  geom.denseColumnOf = geom.dense ? invert(geom.dense.columns) : null;
+  geom.denseZRowOf = geom.dense ? invert(geom.dense.z_rows) : null;
+  // Whether the fold left the code's own order alone -- it does for a tile,
+  // whose slots only spread apart, and not for the rotated code, which is
+  // indexed i*d+j while the square it is cut from goes sector by sector.
+  geom.reordered = !!geom.dense &&
+    !geom.dense.columns.every((place, index) => place === index);
 }
 
 // Subgraph mode: c-nodes go in and out freely, v-nodes only within the pool
@@ -355,7 +394,11 @@ async function loadCode(codeId) {
 function fit() {
   // Boundary anchors sit outside the qubit block (x from -2 on b3w6 L=3), so
   // the frame has to be taken over the c-nodes too or they get clipped away.
-  const marks = geom.qubits.map(q => [q.x, q.y]).concat(geom.z_draw);
+  let marks = geom.qubits.map(q => [q.x, q.y]).concat(geom.z_draw);
+  if (showGhosts.checked) {                // they sit outside the live lattice
+    marks = marks.concat(geom.ghost_qubits.map(q => [q.x, q.y]),
+                         geom.ghost_z_checks, geom.ghost_x_checks);
+  }
   const xs = marks.map(mark => mark[0]), ys = marks.map(mark => mark[1]);
   // A wrapping layout shows a strip of its neighbouring copies, so the frame
   // is widened enough for one row and column of them to be visible.
@@ -465,6 +508,40 @@ function draw() {
   // (checks) are squares.  Z-checks fill when lit; X-checks are dashed, since
   // an X error never reaches them.
   const radius = Math.max(3, view.scale * 0.1);
+
+  // Qubits and checks the construction dropped: no row or column carries them,
+  // but the lattice they were laid out on still runs through here.
+  if (showGhosts.checked) {
+  ctx.globalAlpha = 0.55 * alpha;
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = colour('--text-muted');
+  ctx.lineWidth = Math.max(1, thickness * 0.45);
+  geom.ghost_qubits.forEach(qubit => {
+    const gx = toX(qubit.x + shiftX, view), gy = toY(qubit.y + shiftY, view);
+    ctx.beginPath();
+    if (qubit.shape === 'H') { ctx.moveTo(gx - half, gy); ctx.lineTo(gx + half, gy); }
+    else if (qubit.shape === 'V') { ctx.moveTo(gx, gy - half); ctx.lineTo(gx, gy + half); }
+    else { ctx.arc(gx, gy, thickness * 0.5, 0, 2 * Math.PI); }
+    ctx.stroke();
+  });
+  // A dropped check gets a crossed square, so it reads as "was here, gone"
+  // rather than as a quiet c-node.  X ghosts follow the X-check toggle: with
+  // the live ones hidden, their ghosts alone would read as an empty sublattice.
+  ctx.lineWidth = 1.5;
+  const ghostChecks = showChecks.checked
+    ? geom.ghost_z_checks.concat(geom.ghost_x_checks) : geom.ghost_z_checks;
+  ghostChecks.forEach(centre => {
+    const gx = toX(centre[0] + shiftX, view), gy = toY(centre[1] + shiftY, view);
+    ctx.beginPath();
+    ctx.rect(gx - radius, gy - radius, 2 * radius, 2 * radius);
+    ctx.moveTo(gx - radius, gy - radius); ctx.lineTo(gx + radius, gy + radius);
+    ctx.moveTo(gx + radius, gy - radius); ctx.lineTo(gx - radius, gy + radius);
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.globalAlpha = alpha;
+  }
+
   geom.z_draw.forEach((centre, index) => {
     const x = toX(centre[0] + shiftX, view), y = toY(centre[1] + shiftY, view);
     ctx.beginPath();
@@ -498,9 +575,19 @@ function draw() {
   drawMatrix();                            // the same state, seen as a matrix
 }
 
+// Rows and columns are drawn at their place on the lattice the construction
+// started from, so a pruned one leaves a gap.  Without slots the matrix is
+// dense and index == slot.
+const places = () => usingSlots() ? geom.slots : (geom && geom.dense);
+const columnSlot = index => places() ? places().columns[index] : index;
+const rowSlot = (name, index) => places()
+  ? places()[name === 'X' ? 'x_rows' : 'z_rows'][index] : index;
+
 function drawMatrix() {
   if (!geom) return;
-  const n = geom.n, mx = geom.x_checks.length, mz = geom.z_checks.length;
+  const n = usingSlots() ? geom.slots.column_count : geom.n;
+  const mx = usingSlots() ? geom.slots.x_row_count : geom.x_checks.length;
+  const mz = usingSlots() ? geom.slots.z_row_count : geom.z_checks.length;
   const available = Math.max(240, matrixPane.clientWidth - 20) - GUTTER - 4;
   const requested = +cellSlider.value;
   const cell = requested > 0 ? requested
@@ -530,19 +617,45 @@ function drawMatrix() {
 
   // A column is a qubit in both blocks, so the belief tint spans the whole
   // height — the same number the lattice draws as a halo.
+  // Slots with nothing in them: the qubit or check was pruned away, so the
+  // matrix has no row or column for it — the lattice still ran through here.
+  if (usingSlots()) {
+    // One path, one fill: a row band crossing a column band would otherwise
+    // be painted twice and read as a third, darker kind of empty.
+    const liveColumns = new Set(geom.slots.columns);
+    pctx.fillStyle = 'rgba(128,128,128,.24)';
+    pctx.beginPath();
+    for (let slot = 0; slot < n; slot++) {
+      if (!liveColumns.has(slot)) {
+        blocks.forEach(block => pctx.rect(GUTTER + slot * cell, block.y0,
+                                          cell, block.m * cell));
+      }
+    }
+    blocks.forEach(block => {
+      const live = new Set(block.name === 'X' ? geom.slots.x_rows
+                                              : geom.slots.z_rows);
+      for (let slot = 0; slot < block.m; slot++) {
+        if (!live.has(slot)) {
+          pctx.rect(GUTTER, block.y0 + slot * cell, n * cell, cell);
+        }
+      }
+    });
+    pctx.fill();
+  }
+
   if (step) {
-    for (let column = 0; column < n; column++) {
+    for (let column = 0; column < geom.n; column++) {
       if (errorChance(step.llr[column]) < 0.01) continue;   // keep it quiet
       pctx.fillStyle = 'rgba(224,57,62,' + errorInk(step.llr[column], 0.8).toFixed(3) + ')';
-      blocks.forEach(block => pctx.fillRect(GUTTER + column * cell, block.y0,
-                                            cell, block.m * cell));
+      blocks.forEach(block => pctx.fillRect(GUTTER + columnSlot(column) * cell,
+                                            block.y0, cell, block.m * cell));
     }
   }
 
   blocks.forEach(block => {
     if (block.name === 'Z') {             // X errors light Z-checks, not X ones
       pctx.fillStyle = 'rgba(235,104,52,.16)';
-      lit.forEach(row => pctx.fillRect(GUTTER, block.y0 + row * cell,
+      lit.forEach(row => pctx.fillRect(GUTTER, block.y0 + rowSlot('Z', row) * cell,
                                        n * cell, cell));
     }
     if (cell >= 5) {
@@ -561,53 +674,70 @@ function drawMatrix() {
     }
 
     const pad = cell >= 7 ? 1 : 0;
+
+    // Connections the stencil asked for and the lattice could not give: the
+    // 1s this row would carry if nothing had been cut away.
+    const cutEdges = usingSlots()
+      ? (block.name === 'X' ? geom.ghost_edges_x : geom.ghost_edges_z) : [];
+    pctx.fillStyle = 'rgba(128,128,128,.55)';
+    // Both ends are slots already -- a row that was cut has no index to map.
+    cutEdges.forEach(([row, column]) => {
+      pctx.fillRect(GUTTER + column * cell + pad,
+                    block.y0 + row * cell + pad,
+                    cell - 2 * pad, cell - 2 * pad);
+    });
+
     block.rows.forEach((support, row) => {
-      const y = block.y0 + row * cell + pad;
+      const y = block.y0 + rowSlot(block.name, row) * cell + pad;
       pctx.fillStyle = (block.name === 'Z' && lit.has(row)) ? colour('--lit') : ink;
       support.forEach(column =>
-        pctx.fillRect(GUTTER + column * cell + pad, y, cell - 2 * pad, cell - 2 * pad));
+        pctx.fillRect(GUTTER + columnSlot(column) * cell + pad, y,
+                      cell - 2 * pad, cell - 2 * pad));
     });
 
     // Where the index arithmetic folds, drawn over the data so the blocks stay
     // visible in it.  A fixed five-cell grid would cut across these.
-    if (geom.block) {
+    // The period belongs to whichever matrix is on screen: with the pruned
+    // rows and columns back in their slots that is the lattice the code was
+    // cut from, and the code's own period no longer lines up.
+    const grid = usingSlots() ? (geom.slots.block || null)
+               : (geom.reordered ? null : geom.block);
+    const dividers = usingSlots() ? (geom.slots.dividers || geom.dividers)
+                   : (geom.dense && geom.dense.dividers.length
+                      ? geom.dense.dividers : geom.dividers);
+    if (grid) {
       pctx.strokeStyle = colour('--text-muted');
       pctx.lineWidth = 1;
       pctx.beginPath();
-      // Only over the bulk.  The truncated checks below it march along the
-      // other lattice axis -- one column per group of 2(B-1) rows -- so no
-      // ruling at the bulk's period describes them, and drawing one there
-      // reads as a grid that failed to line up.
-      const stride = block.name === 'X' ? geom.block.rows_x : geom.block.rows_z;
-      const bulk = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
-      const limit = bulk === undefined ? block.m : Math.min(bulk, block.m);
-      const bottom = block.y0 + limit * cell;
-      const starts = [0].concat(geom.dividers);
+      // One rule for the whole matrix: the anchors are swept in a single pass,
+      // so the truncated boundary checks sit inside the blocks rather than in
+      // a section of their own.
+      const stride = block.name === 'X' ? grid.rows_x : grid.rows_z;
+      const starts = [0].concat(dividers);
       starts.forEach((start, sector) => {
         const end = sector + 1 < starts.length ? starts[sector + 1] : n;
-        const width = geom.block.cols[Math.min(sector, geom.block.cols.length - 1)];
+        const width = grid.cols[Math.min(sector, grid.cols.length - 1)];
         for (let column = start; column <= end; column += width) {
           const x = Math.round(GUTTER + column * cell) + .5;
-          pctx.moveTo(x, block.y0); pctx.lineTo(x, bottom);
+          pctx.moveTo(x, block.y0); pctx.lineTo(x, block.y0 + block.m * cell);
         }
       });
-      for (let row = 0; row <= limit; row += stride) {
+      for (let row = 0; row <= block.m; row += stride) {
         const y = Math.round(block.y0 + row * cell) + .5;
         pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
       }
       pctx.stroke();
 
-      if (geom.block.bulk_x !== undefined) {   // where the bulk ends
-        const edge = block.name === 'X' ? geom.block.bulk_x : geom.block.bulk_z;
-        if (edge < block.m) {
-          pctx.strokeStyle = colour('--text');
-          pctx.lineWidth = 2;
-          pctx.beginPath();
-          const y = Math.round(block.y0 + edge * cell) + .5;
-          pctx.moveTo(GUTTER, y); pctx.lineTo(GUTTER + n * cell, y);
-          pctx.stroke();
-        }
-      }
+    } else if (dividers.length) {
+      // Folded up, the period lands nowhere -- the sector split still does.
+      pctx.strokeStyle = colour('--text-muted');
+      pctx.lineWidth = 1;
+      pctx.beginPath();
+      dividers.forEach(column => {
+        const x = Math.round(GUTTER + column * cell) + .5;
+        pctx.moveTo(x, block.y0); pctx.lineTo(x, block.y0 + block.m * cell);
+      });
+      pctx.stroke();
     }
 
     pctx.textAlign = 'right';
@@ -631,12 +761,14 @@ function drawMatrix() {
   if (errorKnown) {
     errorSet.forEach(column => {
       pctx.fillStyle = colour('--error');
-      pctx.fillRect(GUTTER + column * cell, RULER - 7, Math.max(2, cell), 3);
+      pctx.fillRect(GUTTER + columnSlot(column) * cell, RULER - 7,
+                    Math.max(2, cell), 3);
     });
   }
   decided.forEach(column => {
     pctx.fillStyle = colour('--lit');
-    pctx.fillRect(GUTTER + column * cell, RULER - 3, Math.max(2, cell), 2);
+    pctx.fillRect(GUTTER + columnSlot(column) * cell, RULER - 3,
+                  Math.max(2, cell), 2);
   });
 
   // The picked edge is one cell of H_Z, and the edges that fed it are cells of
@@ -647,8 +779,8 @@ function drawMatrix() {
       const [check, qubit] = geom.edges[edge];
       pctx.strokeStyle = colour(colourName);
       pctx.lineWidth = width;
-      pctx.strokeRect(GUTTER + qubit * cell - 1,
-                      matrixView.yZ + check * cell - 1,
+      pctx.strokeRect(GUTTER + columnSlot(qubit) * cell - 1,
+                      matrixView.yZ + rowSlot('Z', check) * cell - 1,
                       cell + 2, cell + 2);
     };
     marked.feeds.forEach(edge => ring(edge, '--lit', 1.5));
@@ -658,7 +790,7 @@ function drawMatrix() {
   if (matrixHover !== null) {
     pctx.strokeStyle = muted;
     pctx.lineWidth = 1.5;
-    blocks.forEach(block => pctx.strokeRect(GUTTER + matrixHover * cell + .5,
+    blocks.forEach(block => pctx.strokeRect(GUTTER + columnSlot(matrixHover) * cell + .5,
                                             block.y0 + .5, cell, block.m * cell));
   }
 
@@ -678,8 +810,13 @@ function pickColumn(event) {
   if (!matrixView) return null;
   const box = pcm.getBoundingClientRect();
   const x = event.clientX - box.left - GUTTER;
-  const column = Math.floor(x / matrixView.cell);
-  return (x >= 0 && column >= 0 && column < matrixView.n) ? column : null;
+  const slot = Math.floor(x / matrixView.cell);
+  if (x < 0 || slot < 0 || slot >= matrixView.n) return null;
+  // An empty slot is a qubit that was pruned away: nothing to click.  Folded
+  // up there are none, but the order is still the lattice's, not the code's.
+  const back = usingSlots() ? geom.columnOf : geom.denseColumnOf;
+  if (!back) return slot;
+  return back.has(slot) ? back.get(slot) : null;
 }
 
 function sayMatrix() {
@@ -973,8 +1110,11 @@ function pickCheckRow(event) {
   const box = pcm.getBoundingClientRect();
   const x = event.clientX - box.left, y = event.clientY - box.top;
   if (x >= GUTTER) return null;            // the gutter, where row numbers are
-  const row = Math.floor((y - matrixView.yZ) / matrixView.cell);
-  return (row >= 0 && row < matrixView.mz) ? row : null;
+  const slot = Math.floor((y - matrixView.yZ) / matrixView.cell);
+  if (slot < 0 || slot >= matrixView.mz) return null;
+  const back = usingSlots() ? geom.zRowOf : geom.denseZRowOf;
+  if (!back) return slot;
+  return back.has(slot) ? back.get(slot) : null;
 }
 
 function nearestQubit(event) {
@@ -1300,6 +1440,7 @@ pSlider.addEventListener('input', () => {
 });
 pSlider.addEventListener('change', decode);
 showChecks.addEventListener('change', draw);
+showGhosts.addEventListener('change', draw);
 showBelief.addEventListener('change', draw);
 cellSlider.addEventListener('input', drawMatrix);
 pcm.addEventListener('click', event => {

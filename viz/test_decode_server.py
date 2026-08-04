@@ -18,6 +18,10 @@ from qec_tile.gf2 import nullspace2
 
 CODE_ID = "tile:b3w6:3"
 FAMILIES = [CODE_ID, "rotated:3", "toric:3", "bb:[[72,12,6]]"]
+# The codes that lose something: the rotated ones are cut to a diamond, and a
+# directional walk shorter than its box gets pruned.  Paper tiles lose nothing.
+GHOST_CODES = ["rotated:3", "rotated:5", "rotated:7", "dir:N2ESEN2:4x4",
+               "dir:N2E2SE2N2:5x4", "dir:N2E2SESE2N2:5x4"]
 
 
 @pytest.fixture
@@ -255,6 +259,99 @@ def test_geometry_check_rows_match_the_matrices(code_id):
     assert geo["z_checks"] == [np.flatnonzero(row).tolist() for row in view.HZ]
     assert geo["x_checks"] == [np.flatnonzero(row).tolist() for row in view.HX]
     assert len(geo["z_centres"]) == view.HZ.shape[0]
+
+
+def slot_entries(geo, name):
+    """The block as the viewer draws it: real 1s and cut edges, by slot."""
+    row_slots = geo["slots"][f"{name}_rows"]
+    real = {(row_slots[row], geo["slots"]["columns"][column])
+            for row, support in enumerate(geo[f"{name}_checks"])
+            for column in support}
+    return real, {tuple(edge) for edge in geo[f"ghost_edges_{name}"]}
+
+
+@pytest.mark.parametrize("code_id", GHOST_CODES)
+def test_a_cut_edge_never_lands_on_a_real_one(code_id):
+    """Both ends have to be gone for a connection to count as cut.  Reading it
+    as "the qubit is off the lattice" instead would draw a ghost cell on top of
+    an entry the code actually has, on every truncated boundary check."""
+    geo = geometry(code_id)
+    for name in "xz":
+        real, cut = slot_entries(geo, name)
+        assert not real & cut, (code_id, name)
+
+
+@pytest.mark.parametrize("code_id", ["dir:N2ESEN2:4x4", "dir:N2E2SE2N2:5x4",
+                                     "dir:N2E2SESE2N2:5x4"])
+def test_slot_space_blocks_are_the_layout_before_pruning(code_id):
+    """The slot matrix is the layout the construction started from, so its
+    period is the paper's arithmetic and its sector split counts slots, not
+    surviving qubits.  Drawn at the code's own boundary the split lands
+    mid-sector and the right-hand block gets ruled at the left-hand width.
+    """
+    geo = geometry(code_id)
+    slots, block = geo["slots"], geo["slots"]["block"]
+    divider, = slots["dividers"]
+    # H edges come first and both sectors are the same rectangle of lattice
+    # columns -- pruning is what makes the two uneven in the code's own matrix.
+    assert slots["column_count"] == 2 * divider
+    assert block["cols"] == [block["cols"][0]] * 2
+    assert divider % block["cols"][0] == 0
+    assert slots["x_row_count"] % block["rows_x"] == 0
+    assert slots["z_row_count"] % block["rows_z"] == 0
+    # And the folded split is the code's own: the same qubits, gaps closed up.
+    assert sum(1 for slot in slots["columns"] if slot < divider) == \
+        geo["dividers"][0]
+
+
+@pytest.mark.parametrize("code_id", ["rotated:5", "dir:N2ESEN2:4x4"])
+def test_pruned_rows_and_columns_carry_their_cut_edges(code_id):
+    """A row pruning took is the connections it had, not a blank line.
+
+    With the pruned rows and columns back in their slots the matrix is the one
+    the construction laid out, so every row and column of it -- surviving or
+    not -- has something in it; a ghost row with nothing drawn would say the
+    check reached for no qubits.
+
+    Not every code can be asked this: the anchor rectangle is sized by the box
+    B, so a walk shorter than its box leaves anchors whose stamp never reaches
+    the lattice, and those rows stay blank on purpose -- N2E2SE2N2 has ten of
+    them.  These two span their box.
+    """
+    geo = geometry(code_id)
+    slots = geo["slots"]
+    columns = set()
+    for name in "xz":
+        real, cut = slot_entries(geo, name)
+        drawn = real | cut
+        assert {row for row, _column in drawn} == \
+            set(range(slots[f"{name}_row_count"])), code_id
+        columns |= {column for _row, column in drawn}
+    # A tile's X and Z offsets differ, so an edge no X-check reaches leaves its
+    # column empty in H_X however little was pruned; only across both blocks
+    # does every qubit of the lattice have to connect to something.
+    assert columns == set(range(slots["column_count"])), code_id
+
+
+@pytest.mark.parametrize("d", [3, 5])
+def test_the_pruned_rotated_matrix_is_the_unrotated_one(d):
+    """The diamond is cut out of the square, so putting the cut rows, columns
+    and edges back gives the square's own matrix -- entry for entry, at the
+    same row and column, not merely a matrix of the same shape.  That only
+    holds if the slots are the unrotated code's indices; any other order (a
+    sort of the coordinates, say) leaves the entries scattered.
+    """
+    rotated = geometry(f"rotated:{d}")
+    square = geometry(f"unrotated:{d}")
+    slots = rotated["slots"]
+    for name in "xz":
+        drawn = {(slots[f"{name}_rows"][row], slots["columns"][column])
+                 for row, support in enumerate(rotated[f"{name}_checks"])
+                 for column in support}
+        drawn |= {tuple(edge) for edge in rotated[f"ghost_edges_{name}"]}
+        assert drawn == {(row, column)
+                         for row, support in enumerate(square[f"{name}_checks"])
+                         for column in support}, name
 
 
 def test_random_error_is_reproducible_and_respects_p(view):

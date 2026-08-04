@@ -64,6 +64,22 @@ class CodeView:
     # centroid of the support does.  None means "work it out from the support".
     x_points: list[tuple[float, float]] | None = None
     z_points: list[tuple[float, float]] | None = None
+    # Qubits and checks the construction built and then dropped: they have no
+    # row or column, so the page draws them on the lattice as ghosts rather
+    # than pretending the lattice ends where the matrix does.
+    ghost_qubits: list[tuple[str, float, float]] = ()
+    # Split by type, because the page hides X-checks behind a toggle: showing
+    # their ghosts anyway would make that sublattice look empty of live ones.
+    ghost_x_checks: list[tuple[float, float]] = ()
+    ghost_z_checks: list[tuple[float, float]] = ()
+    # Where each surviving row and column sits once the matrix is laid out on
+    # the lattice the construction started from, so the pruned ones leave a
+    # gap instead of closing it up.  None means nothing was pruned.
+    slots: dict | None = None
+    # Tanner edges the stencil called for and the lattice could not supply:
+    # (row, column slot) pairs, so the matrix can show the ones cut away.
+    ghost_edges_x: list[tuple[int, int]] = ()
+    ghost_edges_z: list[tuple[int, int]] = ()
     # Where the index arithmetic folds: {"rows_x", "rows_z", "cols"} with one
     # column width per sector, and the sector boundaries themselves.  None for
     # a code built geometrically, which has no such period.
@@ -83,7 +99,9 @@ class CodeView:
 
 
 def _view(label: str, HX, HZ, points, x_points=None, z_points=None,
-          period=None, block=None, dividers=()) -> CodeView:
+          period=None, block=None, dividers=(), ghost_qubits=(),
+          ghost_x_checks=(), ghost_z_checks=(), slots=None,
+          ghost_edges_x=(), ghost_edges_z=()) -> CodeView:
     """Attach logicals to a code that only came with its two check matrices."""
     HX = np.asarray(HX, dtype=np.uint8)
     HZ = np.asarray(HZ, dtype=np.uint8)
@@ -98,7 +116,12 @@ def _view(label: str, HX, HZ, points, x_points=None, z_points=None,
                     quotient_basis(HX, nullspace2(HZ)),
                     quotient_basis(HZ, nullspace2(HX)),
                     x_points=x_points, z_points=z_points, period=period,
-                    block=block, dividers=tuple(dividers))
+                    block=block, dividers=tuple(dividers),
+                    ghost_qubits=list(ghost_qubits),
+                    ghost_x_checks=list(ghost_x_checks),
+                    ghost_z_checks=list(ghost_z_checks), slots=slots,
+                    ghost_edges_x=list(ghost_edges_x),
+                    ghost_edges_z=list(ghost_edges_z))
 
 
 def _view_tile(label: str, code) -> CodeView:
@@ -116,12 +139,13 @@ def _view_tile(label: str, code) -> CodeView:
               for orient, x, y in code.qubits]
     # Everything below is counted, never derived.  Pruning drops the qubits no
     # check of one type touches and then the checks left empty, so on a
-    # directional code L1*L2 rows, L2+B-1 columns and an n/2 sector boundary
-    # are all wrong -- one word loses half its bulk X-checks and splits 45/60
-    # instead of down the middle.
-    def bulk_rows(anchors):
-        inside = [0 <= x < code.L1 and 0 <= y < code.L2 for x, y in anchors]
-        return inside.index(False) if False in inside else len(inside)
+    # directional code L2+B-1 columns and an n/2 sector boundary are both
+    # wrong -- one word splits 45/60 instead of down the middle.
+    def rows_per_group(anchors):
+        """Anchors sharing an i, which is one row block of the matrix."""
+        counts = Counter(x for x, _y in anchors)
+        heights = set(counts.values())
+        return heights.pop() if len(heights) == 1 else None
 
     def sector_width(orient):
         """Qubits per lattice column, or None if the columns are uneven."""
@@ -130,35 +154,253 @@ def _view_tile(label: str, code) -> CodeView:
         return widths.pop() if len(widths) == 1 else None
 
     widths = [sector_width("H"), sector_width("V")]
+    heights = [rows_per_group(code.x_anchors), rows_per_group(code.z_anchors)]
     horizontal = sum(1 for shape, _x, _y in code.qubits if shape == "H")
+
+    # What the construction laid out before pruning took qubits (and then the
+    # checks left empty) away.  Same expressions as build_tile_code.
+    lattice = {(orient, i + dx, j + dy)
+               for orient in "HV"
+               for i in range(code.L1) for j in range(code.L2)
+               for dx in range(code.B) for dy in range(code.B)}
+    full_x = [(i, j) for i in range(code.L1)
+              for j in range(-(code.B - 1), code.L2 + code.B - 1)]
+    full_z = [(i, j) for i in range(-(code.B - 1), code.L1 + code.B - 1)
+              for j in range(code.L2)]
+
+    # The tile itself, read back off the checks: a row's support relative to
+    # its anchor is the stamp, and a boundary row shows only part of it, so
+    # take the union.  TileCode does not carry the tile, and rebuilding it here
+    # would mean repeating the construction.
+    def stamps(matrix, anchors, sweep):
+        """Every (anchor, qubit) the sweep put on the lattice, pruning aside."""
+        tile = {(orient, x - anchor_x, y - anchor_y)
+                for row, (anchor_x, anchor_y) in zip(matrix, anchors)
+                for orient, x, y in (code.qubits[column]
+                                     for column in np.flatnonzero(row))}
+        return [(anchor, qubit)
+                for anchor in sweep
+                for qubit in ((orient, anchor[0] + dx, anchor[1] + dy)
+                              for orient, dx, dy in tile)
+                if qubit in lattice]
+
+    stamps_x = stamps(code.HX, code.x_anchors, full_x)
+    stamps_z = stamps(code.HZ, code.z_anchors, full_z)
+
+    # Ghosts are the whole layout minus what survived -- the paper's anchor
+    # rectangles and the union of the boxes, kept as they are.  A walk shorter
+    # than its box leaves anchors whose stamp never reaches the lattice, and
+    # those show up as rows with nothing in them; that is the sweep, not a bug.
+    live_qubits = set(code.qubits)
+    live_x, live_z = set(code.x_anchors), set(code.z_anchors)
+
+    ghost_qubits = [(EDGE_H, x + 0.5, float(y)) if orient == "H"
+                    else (EDGE_V, float(x), y + 0.5)
+                    for orient, x, y in sorted(lattice - live_qubits)]
+    ghost_x_checks = [(float(x), float(y))
+                      for x, y in sorted(set(full_x) - live_x)]
+    ghost_z_checks = [(float(x), float(y))
+                      for x, y in sorted(set(full_z) - live_z)]
+
+    # The same sets as slot lists: a surviving row or column keeps the place it
+    # had before pruning, so the matrix shows the gaps rather than closing up.
+    lattice_order = {qubit: slot for slot, qubit in enumerate(sorted(lattice))}
+    x_sweep = {anchor: slot for slot, anchor in enumerate(full_x)}
+    z_sweep = {anchor: slot for slot, anchor in enumerate(full_z)}
+
+    def cut_edges(stamped, live_anchors, sweep):
+        """Stamps the lattice could not take: the qubits pruning dropped, and
+        a whole row for every anchor it then emptied.  Slots on both axes, so
+        a row that is gone can still carry its own."""
+        return [(sweep[anchor], lattice_order[qubit])
+                for anchor, qubit in stamped
+                if not (anchor in live_anchors and qubit in live_qubits)]
+
+    slots = dict(
+        columns=[lattice_order[qubit] for qubit in code.qubits],
+        column_count=len(lattice_order),
+        x_rows=[x_sweep[anchor] for anchor in code.x_anchors],
+        x_row_count=len(x_sweep),
+        z_rows=[z_sweep[anchor] for anchor in code.z_anchors],
+        z_row_count=len(z_sweep),
+        # Nothing is pruned in slot space, so the layout is the paper's
+        # arithmetic exactly: L2+B-1 qubits per lattice column with the H
+        # sector first, and one row block per anchor sweep.  The code's own
+        # divider counts surviving qubits and would land mid-sector here.
+        dividers=[sum(1 for orient, _x, _y in lattice if orient == "H")],
+        block=dict(rows_x=code.L2 + 2 * (code.B - 1), rows_z=code.L2,
+                   cols=[code.L2 + code.B - 1] * 2),
+    )
     return CodeView(label, code.HX, code.HZ, points, *code.logicals(),
                     x_points=[(float(x), float(y)) for x, y in code.x_anchors],
                     z_points=[(float(x), float(y)) for x, y in code.z_anchors],
-                    block=None if not all(widths) else dict(
-                        rows_x=code.L2, rows_z=code.L2,
+                    block=None if not (all(widths) and all(heights)) else dict(
+                        rows_x=heights[0], rows_z=heights[1],
                         cols=widths,
-                        bulk_x=bulk_rows(code.x_anchors),
-                        bulk_z=bulk_rows(code.z_anchors),
-                        rows_boundary=2 * (code.B - 1),
                         note=(
-                            f"rows fold every L2 = {code.L2} (anchors per "
-                            f"lattice column); columns every {widths[0]} in "
-                            f"the H sector and {widths[1]} in the V sector "
-                            f"(qubits left per lattice column after pruning, "
-                            f"against L2+B-1 = {code.L2 + code.B - 1}). Bulk "
-                            f"runs to row {bulk_rows(code.z_anchors)}; below "
-                            f"it the truncated boundary checks step along the "
-                            f"other axis, one column per 2(B-1) = "
-                            f"{2 * (code.B - 1)} rows.")),
-                    dividers=(horizontal,))
+                            f"one sweep with j innermost, so a row block is "
+                            f"the anchors sharing an i: {heights[0]} rows in "
+                            f"H_X (j runs over L2+2(B-1) = {code.L2}+2*"
+                            f"{code.B - 1}) and {heights[1]} in H_Z (j runs "
+                            f"over L2 = {code.L2}). Columns fold every "
+                            f"{widths[0]} in the H sector and {widths[1]} in "
+                            f"the V sector, against L2+B-1 = "
+                            f"{code.L2 + code.B - 1} before pruning. Short "
+                            f"rows are tiles pruned to the lattice, scattered "
+                            f"through the blocks rather than gathered at the "
+                            f"end.")),
+                    dividers=(horizontal,),
+                    ghost_qubits=ghost_qubits,
+                    ghost_x_checks=ghost_x_checks,
+                    ghost_z_checks=ghost_z_checks,
+                    slots=slots if (ghost_qubits or ghost_x_checks
+                                    or ghost_z_checks) else None,
+                    ghost_edges_x=cut_edges(stamps_x, live_x, x_sweep),
+                    ghost_edges_z=cut_edges(stamps_z, live_z, z_sweep))
 
 
 def _view_rotated_surface(label: str, d: int) -> CodeView:
     """Qubit ``i*d + j`` sits at column j, row i of the d x d block."""
     HX, HZ = rotated_surface_code(d)
-    points = [(SITE, float(j), float(d - 1 - i))
-              for i in range(d) for j in range(d)]
-    return _view(label, HX, HZ, points)
+    # Drawn on the square lattice the code is cut from, which is what makes the
+    # diamond visible.  Qubit (i, j) is the edge whose midpoint sits at the
+    # medial position a = i+j, b = i-j+1 (one of them is always odd, and that
+    # says whether the edge is horizontal or vertical).  Its X-checks are then
+    # plaquettes of that lattice and its Z-checks are stars -- checked, not
+    # assumed: every row of HX shares one face and every row of HZ one vertex.
+    def edge_of(i, j):
+        a, b = i + j, i - j + 1
+        return (("H", (a - 1) // 2, b // 2) if a % 2
+                else ("V", a // 2, (b - 1) // 2))
+
+    ambient = [edge_of(i, j) for i in range(d) for j in range(d)]
+    # Shifted onto the unrotated code's own frame: with this offset the two
+    # codes' qubit positions coincide exactly (checked -- 41 of 41 at d=5), so
+    # the ghosts below are literally the qubits the unrotated code uses and
+    # this one does not.
+    lift = (d - 1) / 2
+    points = [(EDGE_H, x + 0.5, y + lift) if orient == "H"
+              else (EDGE_V, float(x), y + 0.5 + lift)
+              for orient, x, y in ambient]
+    # There are no anchors outside the lattice here: the rotated code is the
+    # square lattice pruned to a diamond, and the weight-2 checks are faces
+    # that the cut left with two qubits.  Faces sit on a checkerboard, so a
+    # lattice row carries (d-1)/2 of them plus one of those.
+    group = (d - 1) // 2 + 1
+    # Everything of the lattice the cut left outside: its edges, its stars and
+    # its plaquettes.  The diamond is what remains.
+    kept_edges = set(ambient)
+    xs = [x for _orient, x, _y in ambient]
+    ys = [y for _orient, _x, y in ambient]
+    # One index wider than the surviving edges: an edge just outside that range
+    # can still have its midpoint inside the square, and `within` trims the rest.
+    span_x = range(min(xs) - 1, max(xs) + 2)
+    span_y = range(min(ys) - 1, max(ys) + 2)
+
+    # A check sits where its qubits meet: X-checks on a plaquette, Z-checks on
+    # a star.  Taken from the support, so it holds for the cut ones too.
+    def endpoints(edge):
+        orient, x, y = edge
+        return {(x, y), (x + 1, y)} if orient == "H" else {(x, y), (x, y + 1)}
+
+    def touching_faces(edge):
+        orient, x, y = edge
+        return {(x, y - 1), (x, y)} if orient == "H" else {(x - 1, y), (x, y)}
+
+    def meeting_point(row, cells, offset):
+        shared = set.intersection(*[cells(ambient[col])
+                                    for col in np.flatnonzero(row)])
+        x, y = sorted(shared)[0]
+        return (x + offset, y + offset + lift)
+
+    x_points = [meeting_point(row, touching_faces, 0.5) for row in HX]
+    z_points = [meeting_point(row, endpoints, 0.0) for row in HZ]
+    # Only what fits the square the diamond is inscribed in: an edge sticking
+    # out past it would read as the lattice being bigger on one side.
+    left = min(x for _shape, x, _y in points)
+    right = max(x for _shape, x, _y in points)
+    bottom = min(y for _shape, _x, y in points)
+    top = max(y for _shape, _x, y in points)
+    within = lambda x, y: left <= x <= right and bottom <= y <= top
+    ghost_qubits = [(EDGE_H, x + 0.5, y + lift) for x in span_x for y in span_y
+                    if ("H", x, y) not in kept_edges
+                    and within(x + 0.5, y + lift)]
+    ghost_qubits += [(EDGE_V, float(x), y + 0.5 + lift)
+                     for x in span_x for y in span_y
+                     if ("V", x, y) not in kept_edges
+                     and within(x, y + 0.5 + lift)]
+
+    # A ghost is any site of the lattice the code has no check on -- not just
+    # the ones outside it.  A star can touch a surviving edge and still carry
+    # nothing, and those were falling between the two lists.
+    live_stars = {(x, y) for x, y in z_points}
+    live_faces = {(x, y) for x, y in x_points}
+    ghost_z_checks = [(float(x), y + lift) for x in span_x for y in span_y
+                      if (x, y + lift) not in live_stars
+                      and within(x, y + lift)]
+    ghost_x_checks = [(x + 0.5, y + 0.5 + lift) for x in span_x for y in span_y
+                      if (x + 0.5, y + 0.5 + lift) not in live_faces
+                      and within(x + 0.5, y + 0.5 + lift)]
+    # Slots are the unrotated code's own indices, not a sort of the points: the
+    # two codes' qubits, stars and faces sit at the same places, so borrowing
+    # its order makes the pruned matrix *be* the unrotated one with the
+    # diamond's entries picked out of it.  Sorting by position would give a
+    # third order, matching neither code.
+    square = _view_hgp("", repetition_H(d), repetition_H(d))
+    place = lambda x, y: (round(x, 6), round(y, 6))
+    column_of = {place(x, y): index
+                 for index, (_shape, x, y) in enumerate(square.points)}
+    x_row_of = {place(*point): index
+                for index, point in enumerate(square.x_points)}
+    z_row_of = {place(*point): index
+                for index, point in enumerate(square.z_points)}
+
+    # The connections the cut took: each star and plaquette reaches for four
+    # edges, and the ones outside the diamond are the Tanner edges missing from
+    # the row.  Their column is the one the qubit has in the square.
+    live_at = {(x, y) for _shape, x, y in points}
+
+    def cut_edges(centres, ghosts, row_of):
+        """Connections the lattice had and the code does not.
+
+        Both ends count: a surviving check loses its edges to qubits outside
+        the diamond, and a check that went entirely leaves a whole row of them.
+        Addressed by slot on both axes, so a ghost row can carry its own.
+        """
+        live_checks = set(centres)
+        return [(row_of[place(x, y)], column_of[place(*spot)])
+                for x, y in list(centres) + list(ghosts)
+                for spot in ((x - 0.5, y), (x + 0.5, y),
+                             (x, y - 0.5), (x, y + 0.5))
+                if place(*spot) in column_of           # inside the square
+                and not ((x, y) in live_checks and spot in live_at)]
+
+    ghost_edges_z = cut_edges(z_points, ghost_z_checks, z_row_of)
+    ghost_edges_x = cut_edges(x_points, ghost_x_checks, x_row_of)
+
+    return _view(label, HX, HZ, points, x_points=x_points, z_points=z_points,
+                 ghost_qubits=ghost_qubits, ghost_x_checks=ghost_x_checks,
+                 ghost_z_checks=ghost_z_checks,
+                 slots=dict(
+                     columns=[column_of[place(x, y)] for _s, x, y in points],
+                     column_count=len(square.points),
+                     x_rows=[x_row_of[place(*point)] for point in x_points],
+                     x_row_count=len(square.x_points),
+                     z_rows=[z_row_of[place(*point)] for point in z_points],
+                     z_row_count=len(square.z_points),
+                     # The square's own grid: in slot mode the picture is its
+                     # matrix, so its period and sector line are the right ones.
+                     dividers=list(square.dividers), block=square.block),
+                 ghost_edges_x=ghost_edges_x, ghost_edges_z=ghost_edges_z,
+                 block=dict(rows_x=group, rows_z=group, cols=[d],
+                            note=(
+                                f"one row block is a lattice row: {group - 1} "
+                                f"faces (they sit on a checkerboard, so the "
+                                f"support steps two columns at a time) plus "
+                                f"one face the diamond cut left with two "
+                                f"qubits, on the side that row's parity puts "
+                                f"it. Columns fold every d = {d}, the lattice "
+                                f"width.")))
 
 
 def _view_hgp(label: str, H1, H2, period=None) -> CodeView:
@@ -172,14 +414,17 @@ def _view_hgp(label: str, H1, H2, period=None) -> CodeView:
     HX, HZ = hypergraph_product(H1, H2)
     m1, n1 = H1.shape
     m2, n2 = H2.shape
-    points = [(SITE, float(j), float(i)) for i in range(n1) for j in range(n2)]
-    points += [(SITE, b + 0.5, a + 0.5) for a in range(m1) for b in range(m2)]
-    # Checks are indexed the same way and sit on the edges between the sites
-    # they join.  The centroid of the support would not do for the cyclic case:
-    # a check joining row 0 to row L-1 wraps, and its average lands in the
-    # middle of the lattice, nowhere near either.
-    x_points = [(float(j), a + 0.5) for a in range(m1) for j in range(n2)]
-    z_points = [(b + 0.5, float(i)) for i in range(n1) for b in range(m2)]
+    # Qubits on edges, checks on the faces and vertices between them -- the
+    # same convention the rotated code is drawn in, so the two can be compared.
+    # Sector A becomes the horizontal edges and sector B the vertical ones:
+    # then H_X row (a, j) surrounds the face at (j+0.5, a+0.5) and H_Z row
+    # (i, b) the vertex at (b+1, i), which is checked below.
+    points = [(EDGE_V, float(i), j + 0.5)
+              for i in range(n1) for j in range(n2)]
+    points += [(EDGE_H, a + 0.5, float(b + 1))
+               for a in range(m1) for b in range(m2)]
+    x_points = [(a + 0.5, j + 0.5) for a in range(m1) for j in range(n2)]
+    z_points = [(float(i), float(b + 1)) for i in range(n1) for b in range(m2)]
     # H_X rows are indexed (a, j) and H_Z rows (i, b), so the two matrices fold
     # at different heights; the two qubit sectors have different widths too.
     return _view(label, HX, HZ, points, x_points, z_points, period,
@@ -311,6 +556,14 @@ def geometry(code_id: str) -> dict:
         # The Tanner edges of HZ, in the order every message array uses.
         edges=[[int(check), int(qubit)]
                for check, qubit in zip(*tanner_edges(view.HZ))],
+        # Built and then dropped: no row or column, drawn faint on the lattice.
+        ghost_qubits=[dict(shape=shape, x=x, y=y)
+                      for shape, x, y in view.ghost_qubits],
+        ghost_x_checks=[[x, y] for x, y in view.ghost_x_checks],
+        ghost_z_checks=[[x, y] for x, y in view.ghost_z_checks],
+        ghost_edges_x=[[row, slot] for row, slot in view.ghost_edges_x],
+        ghost_edges_z=[[row, slot] for row, slot in view.ghost_edges_z],
+        slots=view.slots,
         logicals=[np.flatnonzero(row).tolist() for row in view.LZ],
     )
 
