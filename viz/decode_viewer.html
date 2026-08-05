@@ -392,9 +392,12 @@ async function loadCode(codeId) {
 
 // Lattice units -> pixels, fitted to the pane with room for the outermost edges.
 function fit() {
-  // Boundary anchors sit outside the qubit block (x from -2 on b3w6 L=3), so
-  // the frame has to be taken over the c-nodes too or they get clipped away.
+  // Boundary anchors sit outside the qubit block (x from -2 on b3w6 L=3): Z
+  // anchors run past it in x and X anchors in y, so both have to be in the
+  // frame or one edge is clipped away.  X-checks only while they are drawn, or
+  // the toggle would leave a band of empty space.
   let marks = geom.qubits.map(q => [q.x, q.y]).concat(geom.z_draw);
+  if (showChecks.checked) marks = marks.concat(geom.x_centres);
   if (showGhosts.checked) {                // they sit outside the live lattice
     marks = marks.concat(geom.ghost_qubits.map(q => [q.x, q.y]),
                          geom.ghost_z_checks, geom.ghost_x_checks);
