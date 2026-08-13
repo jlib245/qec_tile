@@ -32,7 +32,11 @@ from typing import Dict, Optional, Set, Tuple
 import stim
 
 ANY_CLIFFORD_1_OPS = {"C_XYZ", "C_ZYX", "H", "H_YZ", "I"}
-ANY_CLIFFORD_2_OPS = {"CX", "CY", "CZ", "XCX", "XCY", "XCZ", "YCX", "YCY", "YCZ"}
+# Local deviation from upstream: SWAP and CXSWAP are added for the walk circuits
+# in walk.py (arXiv:2606.19482, Algorithm 1). They are 2-qubit Cliffords like the
+# rest, and SI1000 treats every 2q gate the same (= p).
+ANY_CLIFFORD_2_OPS = {"CX", "CY", "CZ", "XCX", "XCY", "XCZ", "YCX", "YCY", "YCZ",
+                      "SWAP", "CXSWAP"}
 RESET_OPS = {"R", "RX", "RY"}
 MEASURE_OPS = {"M", "MX", "MY", "MR", "MRX", "MRY"}
 ANNOTATION_OPS = {"OBSERVABLE_INCLUDE", "DETECTOR", "SHIFT_COORDS", "QUBIT_COORDS", "TICK"}
