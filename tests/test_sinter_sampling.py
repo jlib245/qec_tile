@@ -1,4 +1,4 @@
-"""Parallel shot collection through sinter."""
+"""sinter를 통한 병렬 shot 수집."""
 import pytest
 
 from qec_tile.circuit import memory_z_base, memory_z_circuit
@@ -32,14 +32,14 @@ def test_unknown_decoder_is_rejected():
 
 
 def test_registry_mirrors_serial_except_lsd_cs():
-    """SinterLsdDecoder has no lsd_method knob, so bplsd_cs7 is serial-only."""
+    """SinterLsdDecoder에는 lsd_method 손잡이가 없어서 bplsd_cs7은 serial 전용."""
     from qec_tile.decode import DECODERS
     from qec_tile.sinter_sampling import SINTER_DECODERS
     assert set(SINTER_DECODERS) == set(DECODERS) - {"bplsd_cs7"}
 
 
 def test_max_errors_stops_early():
-    """p=0.05 at rounds=2 fails ~30% of shots, so 5 errors arrive fast."""
+    """rounds=2에서 p=0.05는 shot의 ~30%를 실패시키므로 오류 5개가 빨리 모인다."""
     code = paper_code(*SMALL)
     noisy = memory_z_circuit(code, 2, 0.05)
     stats = collect({"x": noisy}, decoder="bposd_cs7",

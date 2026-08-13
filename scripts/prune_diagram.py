@@ -3,11 +3,13 @@
 논문(arXiv:2606.19482) Figure 7과 같은 형식이다:
 
     빨간 x   지워지는 routing site
-    파란 선  옮겨지는 check (출발점 -> 창이 열리는 자리)
+    파란 선  옮겨지는 출발점 (원래 자리 -> 옮긴 자리). check와 data 모두
 
 caption의 "empty circles denote routing sites, red crosses mark routing sites that
 are removed, and blue arrows indicate shifts of data or check start positions".
-우리는 check만 옮기고 data는 안 옮긴다.
+
+``shorten_route_windows``(창 절단: check 이동 -> 단수 조건 흡수)과 ``trace_prune``
+(후보 이동 탐색)을 다 거친 결과를 그린다.
 
 사용법:
     python scripts/prune_diagram.py --word N2ESEN2 --size 4x4
@@ -17,9 +19,10 @@ from __future__ import annotations
 import argparse
 import os
 
-from qec_tile.directional import build_directional_code
+from qec_tile.directional import build_directional_code, hardware_site
 from qec_tile.walk2 import (CHECK_X, CHECK_Z, DATA, ROUTING, Qubit,
-                            prune_layout, walk_layout)
+                            trace_prune, shorten_route_windows, round_births,
+                            walk_layout)
 
 STYLE = {
     CHECK_X: ("#f2c14e", "#8a6d1f", 11.0),   # 노랑
@@ -60,15 +63,19 @@ def panel(qubit_at, removed, shifts, title, bounds, scale) -> str:
 def figure(code, word: str, scale: float = 24.0) -> str:
     """최적화 전(지워질 것 표시)과 후를 두 패널로."""
     before = walk_layout(code, word)
-    after, births = prune_layout(code, word)
-    # 빨간 x는 지워진 routing만. 옮긴 check의 원래 자리는 파란 선이 말해준다.
+    after, starts = trace_prune(code, word,
+                                     *shorten_route_windows(code, word))
+    # 빨간 x는 지워진 routing만. 옮긴 것의 원래 자리는 파란 선이 말해준다.
     removed = {site for site in set(before) - set(after)
                if before[site].role == ROUTING}
 
     shifts, moved = [], dict(after)
-    for role, index, home, seat, _, _ in births:
+    for role, index, home, seat, _, _ in round_births(code, word, 0, starts):
         shifts.append((home, seat))
         moved[seat] = Qubit(role, index, home)       # 옮긴 자리에 그려준다
+    for site, qubit in after.items():                # data 출발점 이동
+        if qubit.role == DATA and site != hardware_site(code.qubits[qubit.index]):
+            shifts.append((hardware_site(code.qubits[qubit.index]), site))
 
     sites = list(before)
     bounds = (min(x for x, _ in sites), max(x for x, _ in sites),

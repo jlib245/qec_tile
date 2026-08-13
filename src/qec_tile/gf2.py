@@ -1,12 +1,12 @@
-"""Linear algebra over GF(2) — the field where addition is XOR.
+"""GF(2) 선형대수 — 덧셈이 XOR인 체.
 
-Every routine here takes and returns 0/1 ``uint8`` arrays, and row reduction
-is plain ``row ^= pivot_row``: over GF(2) the only nonzero scalar is 1, so
-elimination needs no division and no scaling.
+여기의 모든 루틴은 0/1 ``uint8`` 배열을 받고 돌려준다. 행 소거는 그냥
+``row ^= pivot_row``다 — GF(2)에서 0이 아닌 스칼라는 1뿐이라 나눗셈도
+스케일링도 필요하지 않다.
 
-CSS codes turn coding questions into these: ``k`` is a rank deficiency,
-"which errors pass every check" is a nullspace, and "which of those are
-merely stabilizers" is a quotient.
+CSS 코드는 부호 이론의 질문을 이 연산들로 바꿔놓는다. ``k``는 rank 결손이고,
+"어떤 오류가 모든 check를 통과하는가"는 nullspace이며, "그중 어느 것이 단지
+stabilizer일 뿐인가"는 몫공간이다.
 """
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ import numpy as np
 
 
 def rank2(matrix: np.ndarray) -> int:
-    """Rank of a 0/1 matrix over GF(2)."""
+    """0/1 행렬의 GF(2) 위 rank."""
     work = np.ascontiguousarray(matrix, dtype=np.uint8).copy()
     n_rows, n_cols = work.shape
-    rank = 0                                # pivots so far, and the next row
+    rank = 0                                # 지금까지 잡은 pivot 수, 곧 다음 pivot 행
     for col in range(n_cols):
         below = np.flatnonzero(work[rank:, col])
-        if below.size == 0:                 # nothing to pivot on in this column
+        if below.size == 0:                 # 이 열에는 pivot으로 쓸 것이 없다
             continue
         pivot_row = rank + below[0]
         if pivot_row != rank:
@@ -36,7 +36,7 @@ def rank2(matrix: np.ndarray) -> int:
 
 
 def rref2(matrix: np.ndarray) -> tuple[np.ndarray, list[int]]:
-    """Reduced row echelon form over GF(2), with the pivot columns."""
+    """GF(2) 위 기약 행 사다리꼴(RREF), pivot 열과 함께."""
     work = np.ascontiguousarray(matrix, dtype=np.uint8).copy()
     n_rows, n_cols = work.shape
     pivot_cols: list[int] = []
@@ -60,11 +60,11 @@ def rref2(matrix: np.ndarray) -> tuple[np.ndarray, list[int]]:
 
 
 def nullspace2(matrix: np.ndarray) -> np.ndarray:
-    """Basis of {v : matrix v = 0} over GF(2), one vector per row.
+    """{v : matrix v = 0}의 GF(2) 위 기저, 한 행이 한 벡터.
 
-    One basis vector per free column: set that column to 1, and the pivot
-    columns are then forced to whatever that column holds in the RREF.  Over
-    GF(2) there is no sign to flip, so the RREF entries are copied as they are.
+    free 열 하나가 기저 벡터 하나를 낳는다. 그 열을 1로 두면 pivot 열들은
+    RREF에서 그 열이 갖는 값으로 강제된다. GF(2)에는 뒤집을 부호가 없으니
+    RREF 성분을 그대로 베껴 쓴다.
     """
     n_cols = matrix.shape[1]
     rref, pivot_cols = rref2(matrix)
@@ -77,18 +77,17 @@ def nullspace2(matrix: np.ndarray) -> np.ndarray:
 
 
 def quotient_basis(subspace: np.ndarray, candidates: np.ndarray) -> np.ndarray:
-    """Rows of ``candidates`` independent modulo the row space of ``subspace``.
+    """``subspace``의 행공간을 법으로 독립인 ``candidates``의 행들.
 
-    One incremental elimination rather than a rank recomputation per row: the
-    subspace is eliminated into ``pivots`` first, then every candidate is
-    reduced against it.  A candidate reducing to zero is already spanned; one
-    that does not is kept *and* registered, so the candidates that follow are
-    tested against the accepted ones too.
+    행마다 rank를 다시 재지 않고 소거를 한 번만 한다. 먼저 subspace를
+    ``pivots``에 소거해 넣고, 그다음 후보를 하나씩 그에 대해 줄인다. 0으로
+    줄어든 후보는 이미 span 안에 있다. 그렇지 않은 후보는 남기고 *동시에*
+    등록하므로, 뒤따르는 후보는 앞서 받아들여진 것들에 대해서도 걸러진다.
     """
-    pivots: dict[int, np.ndarray] = {}      # pivot column -> its reduced row
+    pivots: dict[int, np.ndarray] = {}      # pivot 열 -> 줄여진 그 행
 
     def reduce(row):
-        """``row`` minus everything the registered pivots can account for."""
+        """등록된 pivot들이 설명할 수 있는 만큼을 ``row``에서 뺀 나머지."""
         residual = row.copy()
         for pivot_col in sorted(pivots):
             if residual[pivot_col]:
@@ -105,8 +104,8 @@ def quotient_basis(subspace: np.ndarray, candidates: np.ndarray) -> np.ndarray:
     for row in candidates:
         residual = reduce(row)
         nonzero = np.flatnonzero(residual)
-        if nonzero.size:                     # not spanned by what came before
-            pivots[int(nonzero[0])] = residual   # register the reduced form,
-            kept.append(row)                     # but return the original row
+        if nonzero.size:                     # 앞선 것들이 span하지 못한다
+            pivots[int(nonzero[0])] = residual   # 등록은 줄여진 형태로,
+            kept.append(row)                     # 반환은 원래 행으로
     return (np.array(kept, dtype=np.uint8) if kept
             else np.zeros((0, candidates.shape[1]), dtype=np.uint8))

@@ -1,4 +1,4 @@
-"""The nanobind extension builds and imports — a toolchain check."""
+"""nanobind 확장이 빌드되고 import된다 — 툴체인 점검."""
 from qec_tile import add, parity
 
 

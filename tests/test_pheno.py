@@ -1,7 +1,7 @@
-"""Phenomenological noise — space-time check matrix and decoding."""
+"""Phenomenological 잡음 — 시공간 check 행렬과 디코딩."""
 import numpy as np
 
-from qec_tile.decode import failure_rate
+from qec_tile.decode import block_failure_rate
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile.tile import paper_code
 
@@ -18,7 +18,7 @@ def test_shapes():
 
 
 def test_one_round_reduces_to_code_capacity():
-    """With a single (perfect) round there is nothing new: H is HZ."""
+    """(완벽한) 라운드 하나면 새로울 게 없다: H가 곧 HZ다."""
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=1)
     _, LZ = code.logicals()
@@ -27,7 +27,7 @@ def test_one_round_reduces_to_code_capacity():
 
 
 def test_data_columns_are_block_diagonal():
-    """A data error in round t hits the detectors of round t only."""
+    """라운드 t의 data 오류는 라운드 t의 detector만 건드린다."""
     code = paper_code(*SMALL)
     T = 3
     m, n = code.HZ.shape
@@ -40,7 +40,7 @@ def test_data_columns_are_block_diagonal():
 
 
 def test_measurement_columns_are_time_dominoes():
-    """u_t flips the same check's detector in rounds t and t+1 — weight 2."""
+    """u_t는 같은 check의 detector를 라운드 t와 t+1에서 뒤집는다 — weight 2."""
     code = paper_code(*SMALL)
     T = 4
     m, n = code.HZ.shape
@@ -54,7 +54,7 @@ def test_measurement_columns_are_time_dominoes():
 
 
 def test_logical_ignores_measurement_errors():
-    """Measurement errors never flip the observable, only data errors do."""
+    """측정 오류는 observable을 절대 뒤집지 않는다. data 오류만 뒤집는다."""
     code = paper_code(*SMALL)
     T = 3
     m, n = code.HZ.shape
@@ -79,24 +79,29 @@ def test_zero_noise_never_fails():
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=3)
     channel = spacetime_channel(code, rounds=3, p=0.0, meas_error=0.0)
-    assert failure_rate(H, L, channel, shots=50, decoder="bposd_cs7", seed=0) == 0.0
+    assert block_failure_rate(H, L, channel, shots=50,
+                              decoder="bposd_cs7", seed=0) == 0.0
 
 
 def test_seed_is_deterministic():
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=3)
     channel = spacetime_channel(code, rounds=3, p=0.03, meas_error=0.03)
-    a = failure_rate(H, L, channel, shots=100, decoder="bposd_cs7", seed=5)
-    b = failure_rate(H, L, channel, shots=100, decoder="bposd_cs7", seed=5)
+    a = block_failure_rate(H, L, channel, shots=100,
+                           decoder="bposd_cs7", seed=5)
+    b = block_failure_rate(H, L, channel, shots=100,
+                           decoder="bposd_cs7", seed=5)
     assert a == b
 
 
 def test_measurement_noise_hurts():
-    """At the same p, adding measurement noise cannot help."""
+    """같은 p에서 측정 잡음을 더하는 것이 도움이 될 수는 없다."""
     code = paper_code(*SMALL)
     H, L = spacetime_matrices(code, rounds=4)
     quiet = spacetime_channel(code, rounds=4, p=0.04, meas_error=0.0)
     noisy = spacetime_channel(code, rounds=4, p=0.04, meas_error=0.08)
-    r_quiet = failure_rate(H, L, quiet, shots=600, decoder="bposd_cs7", seed=1)
-    r_noisy = failure_rate(H, L, noisy, shots=600, decoder="bposd_cs7", seed=1)
+    r_quiet = block_failure_rate(H, L, quiet, shots=600,
+                                 decoder="bposd_cs7", seed=1)
+    r_noisy = block_failure_rate(H, L, noisy, shots=600,
+                                 decoder="bposd_cs7", seed=1)
     assert r_quiet <= r_noisy

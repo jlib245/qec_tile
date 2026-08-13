@@ -1,10 +1,10 @@
-"""Tile geometry — the symmetry condition (T2) buys."""
+"""tile 기하 — (T2)가 사주는 대칭성."""
 import numpy as np
 import pytest
 
 from qec_tile.tile import z_tile_from_x
 
-# (B, X_H, X_V) — the paper's b3w6 and b4w8 tiles
+# (B, X_H, X_V) — 논문의 b3w6, b4w8 tile
 TILES = [
     (3, [(0, 0), (2, 1), (2, 2)], [(0, 2), (1, 2), (2, 0)]),
     (4, [(0, 0), (0, 3), (2, 2), (3, 0)], [(0, 1), (1, 0), (1, 1), (3, 3)]),
@@ -17,7 +17,7 @@ def as_edges(horizontal, vertical):
 
 
 def overlap(a: set, b: set, dx: int, dy: int) -> int:
-    """How many qubits ``a`` shares with ``b`` shifted by (dx, dy)."""
+    """``a``가 (dx, dy)만큼 옮긴 ``b``와 공유하는 qubit 수."""
     return len(a & {(orient, x + dx, y + dy) for (orient, x, y) in b})
 
 
@@ -42,7 +42,7 @@ def test_dual_preserves_weight(B, x_h, x_v):
 
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_every_relative_overlap_is_even(B, x_h, x_v):
-    """Why (T2) exists: even overlap is what makes X and Z commute."""
+    """(T2)가 있는 이유: overlap이 짝수여야 X와 Z가 교환한다."""
     X = as_edges(x_h, x_v)
     Z = as_edges(*z_tile_from_x(x_h, x_v, B))
     for dx in range(-B, B + 1):
@@ -52,7 +52,7 @@ def test_every_relative_overlap_is_even(B, x_h, x_v):
 
 @pytest.mark.parametrize("B,x_h,x_v", TILES)
 def test_h_and_v_overlaps_are_equal(B, x_h, x_v):
-    """The mechanism: the H and V overlaps match, so the total is twice one."""
+    """메커니즘: H와 V의 overlap이 일치하므로 총합은 한쪽의 두 배다."""
     z_h, z_v = z_tile_from_x(x_h, x_v, B)
     XH, XV = as_edges(x_h, []), as_edges([], x_v)
     ZH, ZV = as_edges(z_h, []), as_edges([], z_v)
@@ -62,7 +62,7 @@ def test_h_and_v_overlaps_are_equal(B, x_h, x_v):
 
 
 def test_even_overlap_holds_for_random_tiles():
-    """Not luck of the two tiles above — (T2) alone forces it."""
+    """위 두 tile의 운이 아니다 — (T2)만으로 강제된다."""
     rng = np.random.default_rng(0)
     for _ in range(20):
         B = int(rng.integers(2, 6))

@@ -7,10 +7,11 @@ from qec_tile.directional import (DIRECTIONS, build_directional_code,
                                   walk_edges)
 from qec_tile.noise_model import NoiseModel
 from qec_tile.walk2 import (CHECK_X, CHECK_Z, DATA, ROUTING, Qubit,
-                            births_for, check_starts, check_windows, flow_step,
-                            partial_sums, prune_by_testing, prune_layout,
-                            reverse_steps, walk_crossings, walk_layout,
-                            walk_memory_z_base, walk_round, walk_schedule)
+                            births_for, check_starts, route_windows, flow_step,
+                            partial_sums, trace_prune, shorten_route_windows,
+                            reverse_steps, round_births, walk_crossings,
+                            walk_layout, walk_memory_z_base, walk_round,
+                            walk_schedule)
 
 # 논문 Table 2의 word 셋. 아래 세 word 모두 Definition 1을 만족한다.
 WORDS = ["NESEN", "N2ESEN2", "N2E2SESE2N2"]
@@ -536,7 +537,7 @@ PRUNED = [("NESEN", 2, 2), ("NESEN", 4, 4), ("N2ESEN2", 4, 4),
 
 @pytest.mark.parametrize("word,L1,L2", LAYOUTS)
 def test_the_windows_match_what_the_round_measures(word, L1, L2):
-    """``check_windows``의 산술이 흐름을 실제로 돌린 결과와 같다.
+    """``route_windows``의 산술이 흐름을 실제로 돌린 결과와 같다.
 
     왼쪽은 ``h_m``으로 바로 낸 것이고 오른쪽은 ``flow_step``을 ``w``번 굴린 결과라
     서로 독립이다. 창이 틀리면 reset·측정이 엉뚱한 moment에 놓인다.
@@ -544,7 +545,7 @@ def test_the_windows_match_what_the_round_measures(word, L1, L2):
     code = build_directional_code(word, L1, L2)
     _, windows = walk_round(code, walk_layout(code, word),
                             parse_directional_word(word))
-    assert check_windows(code, word) == windows
+    assert route_windows(code, word) == windows
 
 
 @pytest.mark.parametrize("word,L1,L2", PRUNED)
@@ -556,22 +557,24 @@ def test_pruning_keeps_the_stabilisers(word, L1, L2):
     the measured stabiliser supports, detectors and logical observables".
     """
     code = build_directional_code(word, L1, L2)
-    layout, births = prune_layout(code, word)
-    walk_round(code, layout, parse_directional_word(word), births)
+    layout, shifts = shorten_route_windows(code, word)
+    walk_round(code, layout, parse_directional_word(word),
+               births_for(code, word, 0, layout, shifts))
 
 
 def test_pruning_removes_routing():
-    """실측: routing이 28->20, 48->32, 84->61로 준다.
+    """실측: routing이 28->18, 48->30, 84->53으로 준다.
 
-    죽은 앞뒤 구간의 자리와 옮긴 check의 원래 출발점이 같이 빠진다.
+    죽은 앞뒤 구간의 자리와 옮긴 것의 원래 자리가 같이 빠진다. 출발점을 한 칸 옮길
+    때마다 배치를 다시 지어 검증하므로, 필요 없어진 앞 구간이 통째로 빠진다.
     """
     for (word, L1, L2), before, after in (
-            (("NESEN", 2, 2), 28, 20), (("NESEN", 4, 4), 48, 32),
-            (("N2ESEN2", 4, 4), 84, 61)):
+            (("NESEN", 2, 2), 28, 18), (("NESEN", 4, 4), 48, 30),
+            (("N2ESEN2", 4, 4), 84, 53)):
         code = build_directional_code(word, L1, L2)
         plain = sum(1 for qubit in walk_layout(code, word).values()
                     if qubit.role == ROUTING)
-        layout, _ = prune_layout(code, word)
+        layout, _ = shorten_route_windows(code, word)
         pruned = sum(1 for qubit in layout.values() if qubit.role == ROUTING)
         assert (plain, pruned) == (before, after)
 
@@ -585,56 +588,61 @@ def test_a_birth_seat_is_left_empty(word, L1, L2):
     앞에 data가 있을 때 걸어가 버려 흐름에 없던 walker가 하나 늘어난다.
     """
     code = build_directional_code(word, L1, L2)
-    layout, births = prune_layout(code, word)
-    for _, _, _, seat, _, _ in births:
+    layout, shifts = shorten_route_windows(code, word)
+    for _, _, _, seat, _, _ in round_births(code, word, 0, shifts):
         assert seat not in layout
 
 
-def test_a_check_whose_seat_is_taken_stays_put():
-    """태어날 자리가 data 제자리면 비울 수 없으므로 그 check는 안 옮긴다.
+def test_no_check_moves_past_its_window():
+    """출발점은 창이 열리는 층을 넘지 못한다 -- 넘으면 첫 상호작용을 건너뛴다.
 
-    ``N2ESEN2`` 4x4는 창이 늦게 열리는 check가 16개인데 9개만 옮겨지고 7개가 남는다.
-    남은 것들은 원래 출발점에 그대로 앉아 있어야 한다.
+    창이 층 0에 열리는 check는 아예 못 옮기고(그래서 ``shifts``에 없고), 나머지는
+    ``0 < j <= first``다. ``N2ESEN2`` 4x4는 창이 늦게 열리는 check가 16개이고 이제
+    전부 옮겨진다 -- 단수 조건 대신 검증으로 판단하기 때문이다.
     """
     code = build_directional_code("N2ESEN2", 4, 4)
-    layout, births = prune_layout(code, "N2ESEN2")
-    windows = check_windows(code, "N2ESEN2")
-    x_starts, z_starts = check_starts(code, "N2ESEN2")
-    start_of = {(role, index): site
-                for role, starts in ((CHECK_X, x_starts), (CHECK_Z, z_starts))
-                for index, site in enumerate(starts)}
+    layout, shifts = shorten_route_windows(code, "N2ESEN2")
+    windows = route_windows(code, "N2ESEN2")
     late = {key for key, (first, _) in windows.items() if first > 0}
-    moved = {(role, index) for role, index, *_ in births}
-    assert len(late) == 16 and len(moved) == 9
-    for key in late - moved:
-        assert layout[start_of[key]] == Qubit(key[0], key[1], start_of[key])
+    assert len(late) == 16
+    assert set(shifts) <= late               # 창이 층 0이면 못 옮긴다
+    for key, j in shifts.items():
+        assert 0 < j <= windows[key][0]
 
 
-def two_rounds(code, word, layout):
+def two_rounds(code, word, layout, shifts=()):
     """word와 역 word 한 번씩. ``walk_round``가 안에서 support를 대조한다."""
     steps = parse_directional_word(word)
     qubit_at = dict(layout)
     for round_index, these in enumerate((steps, reverse_steps(steps))):
         walk_round(code, qubit_at, these,
-                   births_for(code, word, round_index, qubit_at))
+                   births_for(code, word, round_index, qubit_at, shifts))
     return qubit_at
 
 
-def test_generating_and_testing_removes_more():
-    """구성적 규칙이 최소가 아니다. 후보 이동을 시도하면 더 빠진다 -- 실측
-    20->15, 32->23, 61->50.
+def fully_pruned(code, word):
+    """구성적 절단 위에 후보 이동 탐색까지 -- 최종 배치."""
+    return trace_prune(code, word, *shorten_route_windows(code, word))
 
-    논문 Appendix C의 "generating and testing"이 이것이다. 규칙으로 잡지 못하는
-    자리는 그 자리를 지나가던 walker가 실은 없어도 되는 경우인데, 그건 기하에 따라
-    달라 돌려보는 편이 확실하다.
+
+def test_generating_and_testing_removes_more():
+    """창 절단만으로는 최소가 아니다. 후보 이동을 더 시도하면 빠진다 -- 실측
+    18->14, 30->24, 53->47.
+
+    기본값은 data 이동을 끈 상태다 (``move_data=False``). 켜면 각각 12/20/44까지 가지만
+    data가 논리 자리에서 깊이 4~5까지 끌려 들어간다.
+
+    논문 Appendix C의 trace pruning이 이것이다. 창 절단이 잡지 못하는 자리는 그 자리를
+    지나가던 walker가 실은 없어도 되는 경우인데, 그건 기하에 따라 달라 돌려보는 편이
+    확실하다.
     """
     for (word, L1, L2), before, after in (
-            (("NESEN", 2, 2), 20, 15), (("NESEN", 4, 4), 32, 23),
-            (("N2ESEN2", 4, 4), 61, 50)):
+            (("NESEN", 2, 2), 18, 14), (("NESEN", 4, 4), 30, 24),
+            (("N2ESEN2", 4, 4), 53, 47)):
         code = build_directional_code(word, L1, L2)
-        layout, _ = prune_layout(code, word)
+        layout, _ = shorten_route_windows(code, word)
         assert sum(1 for q in layout.values() if q.role == ROUTING) == before
-        tested = prune_by_testing(code, word, layout)
+        tested, _ = fully_pruned(code, word)
         assert sum(1 for q in tested.values() if q.role == ROUTING) == after
 
 
@@ -646,37 +654,172 @@ def test_the_tested_layout_still_measures_the_stabilisers(word, L1, L2):
     되돌려진 상태로 새어나오는 것을 잡는다.
     """
     code = build_directional_code(word, L1, L2)
-    tested = prune_by_testing(code, word, prune_layout(code, word)[0])
-    two_rounds(code, word, tested)
+    two_rounds(code, word, *fully_pruned(code, word))
 
 
 def test_nothing_more_can_be_removed():
     """고정점까지 돈다 -- 남은 routing은 하나도 더 뺄 수 없다.
 
-    한 번만 훑으면 안 된다: 하나를 빼면 다른 자리가 뺄 수 있게 되고, check를 옮기면
+    한 번만 훑으면 안 된다: 하나를 빼면 다른 자리가 뺄 수 있게 되고, 출발점을 옮기면
     그 앞 구간이 다시 후보가 된다.
     """
     code = build_directional_code("NESEN", 2, 2)
-    tested = prune_by_testing(code, "NESEN", prune_layout(code, "NESEN")[0])
+    tested, shifts = fully_pruned(code, "NESEN")
     for site in [s for s, q in tested.items() if q.role == ROUTING]:
         trial = {s: q for s, q in tested.items() if s != site}
         with pytest.raises(ValueError):
-            two_rounds(code, "NESEN", trial)
+            two_rounds(code, "NESEN", trial, shifts)
+
+
+def test_the_single_user_condition_only_gates_the_second_substep():
+    """원문의 순서: 먼저 check를 옮기고, **그 다음** 단수 조건으로 흡수한다.
+
+    "the check start position can be shifted and the corresponding terminal routing
+    sites can be removed, provided that no check-start collision or data-check
+    overlap is introduced. **We then apply the same principle** to terminal routing
+    sites **used only by a single** data or check qubit q."
+
+    조건을 1a에도 걸면 check가 못 움직여 훨씬 덜 빠진다 -- ``N2E2SESE2N2`` 17x6에서
+    248 대신 282였다. 여기서는 그 순서의 결과를 숫자로 고정한다: data 이동은 1b에서만
+    일어나므로 창이 늦게 열리는 data 중 일부만 옮겨진다.
+    """
+    code = build_directional_code("N2ESEN2", 4, 4)
+    layout, shifts = shorten_route_windows(code, "N2ESEN2")
+    home = {col: hardware_site(edge)
+            for col, edge in enumerate(code.qubits)}
+    moved_data = [site for site, qubit in layout.items()
+                  if qubit.role == DATA and site != home[qubit.index]]
+    assert shifts                              # 1a에서 check가 옮겨졌다
+    assert moved_data                          # 1b에서 data도 옮겨졌다
+    assert len(moved_data) < code.n            # 전부는 아니다
+    two_rounds(code, "N2ESEN2", layout, shifts)
+
+
+def test_a_missing_check_is_caught():
+    """check가 배치에서 빠지면 아무 열도 못 먹어 대조에서 걸린다.
+
+    원문의 "no **check-start collision**" 조건을 우리는 사전에 안 보고 검증으로
+    대신한다. 두 check가 같은 자리를 쓰면 배치 dict에서 한쪽이 덮여 사라지는데,
+    그 결과가 여기서 잡히는지를 고정한다.
+    """
+    code = build_directional_code("NESEN", 2, 2)
+    layout = walk_layout(code, "NESEN")
+    x_starts, _ = check_starts(code, "NESEN")
+    del layout[x_starts[1]]
+    with pytest.raises(ValueError, match="support"):
+        walk_round(code, layout, parse_directional_word("NESEN"))
+
+
+def test_a_check_on_a_data_site_is_caught():
+    """check를 data 자리에 놓으면 그 data가 덮여 흐름이 깨진다.
+
+    원문의 "no **data-check overlap**" 조건 쪽이다. 덮인 자리에서 걷는 것끼리 만나
+    ``two checks meet``으로 걸린다.
+    """
+    code = build_directional_code("NESEN", 2, 2)
+    layout = walk_layout(code, "NESEN")
+    site = next(s for s, qubit in sorted(layout.items())
+                if qubit.role == DATA)
+    layout[site] = Qubit(CHECK_X, 0, site)
+    with pytest.raises(ValueError, match="meet|support"):
+        walk_round(code, layout, parse_directional_word("NESEN"))
+
+
+@pytest.mark.parametrize("word,L1,L2", PRUNED)
+def test_moved_data_lands_on_a_vacated_site(word, L1, L2):
+    """"a data-start shift onto a former **routing** coordinate".
+
+    옮긴 data가 앉는 자리는 무손실 배치에서 routing이었던 곳이다 -- 단수 조건이 그
+    자리를 그 열만 쓰게 보장하므로 다른 check의 출발점일 수 없다. 예외는 그 자리가
+    **자기도 옮겨 간 다른 열의 제자리**인 경우다 (``N2E2SESE2N2`` 17x6에서 6건 중 1건).
+
+    그리고 어느 경우든 열마다 자리가 하나씩이어야 한다 -- 두 열이 겹치면 한쪽이 덮여
+    사라진다.
+    """
+    code = build_directional_code(word, L1, L2)
+    plain = walk_layout(code, word)
+    layout, _ = shorten_route_windows(code, word)
+    home_of = {col: hardware_site(edge)
+               for col, edge in enumerate(code.qubits)}
+    seats = {qubit.index: site for site, qubit in layout.items()
+             if qubit.role == DATA}
+    assert len(seats) == code.n                # 열마다 자리 하나
+    moved = {col for col, site in seats.items() if site != home_of[col]}
+    for col in moved:
+        site = seats[col]
+        if plain[site].role == ROUTING:
+            continue
+        other = plain[site].index              # 다른 열의 제자리였다면
+        assert plain[site].role == DATA and other in moved
+
+
+def occupancy(layout) -> dict:
+    """자리별 (역할, index). routing끼리는 ``|0>``이라 구별되지 않는다."""
+    return {site: (qubit.role, qubit.index if qubit.role != ROUTING else None)
+            for site, qubit in layout.items()}
+
+
+@pytest.mark.parametrize("word,L1,L2", [("NESEN", 2, 2), ("N2ESEN2", 4, 4)])
+def test_the_layout_settles_into_a_two_round_cycle(word, L1, L2):
+    """라운드 교대가 배치를 주기 2로 되돌린다.
+
+    무손실 배치는 두 라운드마다 **초기 상태로** 복원된다 ("the physical layout is
+    restored"). 줄인 배치는 첫 라운드에 태어날 자리들이 채워지며 자리가 한 번 늘고,
+    그 뒤로는 라운드 2 상태에서 주기 2로 돈다 -- 초기 상태가 과도기다.
+
+    ``survives``가 두 라운드만 보는 근거가 이것이다. 과도기(정방향)와 역방향을 한 번씩
+    거치면 그 뒤는 반복이므로, 배치 규칙을 건드려 3라운드 이후에만 깨지는 회귀가 있으면
+    여기서 드러난다.
+    """
+    code = build_directional_code(word, L1, L2)
+    steps = parse_directional_word(word)
+    backward = reverse_steps(steps)
+
+    def marks_over(layout, shifts):
+        qubit_at = dict(layout)
+        marks = [occupancy(qubit_at)]
+        for round_index in range(5):
+            walk_round(code, qubit_at,
+                       steps if round_index % 2 == 0 else backward,
+                       births_for(code, word, round_index, qubit_at, shifts))
+            marks.append(occupancy(qubit_at))
+        return marks
+
+    plain = marks_over(walk_layout(code, word), {})
+    assert plain[2] == plain[0] and plain[4] == plain[0]
+
+    pruned = marks_over(*fully_pruned(code, word))
+    assert pruned[0] != pruned[2]              # 초기는 과도기
+    assert pruned[4] == pruned[2]              # 그 뒤로는 주기 2
+    assert len(pruned[0]) < len(pruned[2]) == len(pruned[4])
+
+
+def test_more_rounds_stay_silent():
+    """줄인 배치가 라운드 수와 무관하게 조용하다.
+
+    ``rounds=3``만 보면 주기가 어긋나 5라운드에서만 우는 회귀를 놓친다. 홀수·짝수를
+    섞어 걸어둔다.
+    """
+    code = build_directional_code("NESEN", 2, 2)
+    layout, shifts = fully_pruned(code, "NESEN")
+    for rounds in (1, 2, 3, 5, 8):
+        circuit = walk_memory_z_base(code, "NESEN", rounds, layout, shifts)
+        detections, observables = circuit.compile_detector_sampler().sample(
+            32, separate_observables=True)
+        assert not detections.any() and not observables.any(), rounds
+        assert (circuit.detector_error_model().num_detectors
+                == circuit.num_detectors), rounds
 
 
 def test_the_tested_layout_shrinks_the_circuit_too():
-    """trace pruning은 회로까지 줄인다 -- 실측 54 -> 49 qubit.
+    """pruning은 회로까지 줄인다 -- 실측 54 -> 48 qubit.
 
-    ``prune_layout``이 빼는 자리는 gate에 한 번도 안 나와 회로에서 이미 빠지고
-    있었지만, 여기서는 ``SWAP``을 나르던 자리 중 없어도 되는 것까지 찾아낸다.
     detector와 observable은 그대로여야 한다 -- 그게 채택 기준이다.
     """
     code = build_directional_code("NESEN", 2, 2)
     plain = walk_memory_z_base(code, "NESEN", 3, walk_layout(code, "NESEN"))
-    tested = walk_memory_z_base(
-        code, "NESEN", 3,
-        prune_by_testing(code, "NESEN", prune_layout(code, "NESEN")[0]))
-    assert (plain.num_qubits, tested.num_qubits) == (54, 49)
+    tested = walk_memory_z_base(code, "NESEN", 3, *fully_pruned(code, "NESEN"))
+    assert (plain.num_qubits, tested.num_qubits) == (54, 48)
     assert tested.num_detectors == plain.num_detectors
     assert tested.num_observables == plain.num_observables
     detections, observables = tested.compile_detector_sampler().sample(
@@ -872,17 +1015,18 @@ def test_routing_that_never_gates_is_left_out():
 
 @pytest.mark.parametrize("word,L1,L2", [("NESEN", 2, 2), ("N2ESEN2", 4, 4)])
 def test_the_pruned_layout_gives_the_same_circuit(word, L1, L2):
-    """줄인 배치로도 같은 회로가 나온다.
+    """줄인 배치로도 재는 것이 같다 -- qubit만 줄어든다.
 
     "The optimisation preserves the measured stabiliser supports, detectors and
-    logical observables." 잘라낸 routing은 원래 gate에 안 나와 회로에서 이미 빠지고
-    있었으므로, qubit 수까지 같아야 한다 -- 줄어드는 것은 하드웨어 배치다.
+    logical observables." 그래서 detector와 observable 수는 그대로여야 하고, qubit은
+    줄기만 해야 한다 (실측: `NESEN` 2x2에서 54 -> 51, `N2ESEN2` 4x4에서 172 -> 164).
     """
     code = build_directional_code(word, L1, L2)
     plain = walk_memory_z_base(code, word, 3, walk_layout(code, word))
-    pruned = walk_memory_z_base(code, word, 3, prune_layout(code, word)[0])
-    assert (pruned.num_qubits, pruned.num_detectors, pruned.num_observables) \
-        == (plain.num_qubits, plain.num_detectors, plain.num_observables)
+    pruned = walk_memory_z_base(code, word, 3, *shorten_route_windows(code, word))
+    assert (pruned.num_detectors, pruned.num_observables) \
+        == (plain.num_detectors, plain.num_observables)
+    assert pruned.num_qubits < plain.num_qubits
     detections, observables = pruned.compile_detector_sampler().sample(
         64, separate_observables=True)
     assert not detections.any()
@@ -899,9 +1043,9 @@ def test_a_check_is_reborn_where_it_was_read(pruned):
     엉뚱한 곳에 reset을 거는 것이다.
     """
     code = build_directional_code("NESEN", 2, 2)
-    layout = (prune_layout(code, "NESEN")[0] if pruned
-              else walk_layout(code, "NESEN"))
-    schedule, _, _ = walk_schedule(code, "NESEN", 3, layout)
+    layout, shifts = (shorten_route_windows(code, "NESEN") if pruned
+                      else (walk_layout(code, "NESEN"), {}))
+    schedule, _, _ = walk_schedule(code, "NESEN", 3, layout, shifts)
     for earlier, later in zip(schedule, schedule[1:]):
         read = {key: site for _, _, measure in earlier for key, site in measure}
         born = {key: site for reset, _, _ in later for key, site in reset}
@@ -911,8 +1055,8 @@ def test_a_check_is_reborn_where_it_was_read(pruned):
 def test_every_check_is_reset_and_measured_once_per_round_when_pruned():
     """줄인 배치에서도 라운드마다 모든 check가 한 번 켜지고 한 번 읽힌다."""
     code = build_directional_code("NESEN", 2, 2)
-    layout, _ = prune_layout(code, "NESEN")
-    schedule, _, _ = walk_schedule(code, "NESEN", 3, layout)
+    layout, shifts = shorten_route_windows(code, "NESEN")
+    schedule, _, _ = walk_schedule(code, "NESEN", 3, layout, shifts)
     for moments in schedule:
         resets = [key for reset, _, _ in moments for key, _ in reset]
         measures = [key for _, _, measure in moments for key, _ in measure]

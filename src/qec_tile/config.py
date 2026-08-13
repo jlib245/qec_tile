@@ -1,13 +1,10 @@
-"""Allocation settings from ``.env`` (see ``.env.example``).
+"""``.env``에서 읽는 자원 할당 설정 (``.env.example`` 참고).
 
-This is a shared host and the CPU/GPU quota is administrative — there is no
-cgroup limit, so ``os.cpu_count()`` cannot see it.  The allocation therefore
-has to be written down, and deliberately has **no defaults**: nothing here
-invents a worker count, values are read lazily and raise when missing.  Real
-environment variables take priority over ``.env``.
+공유 호스트의 할당량은 행정적이라 cgroup에 없다 — ``os.cpu_count()``로는
+보이지 않으니 직접 적어둔다. 기본값은 일부러 없다: 없는 값은 예외로 터진다.
 
-Import this before numpy when thread caps matter: BLAS reads the ``*_THREADS``
-variables only once, when the library loads.
+thread cap이 필요하면 numpy보다 먼저 import한다. BLAS는 ``*_THREADS``를
+로드될 때 한 번만 읽는다.
 """
 from __future__ import annotations
 
@@ -17,7 +14,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 
 ENV_FILE: str | None = find_dotenv(usecwd=True) or None
-if ENV_FILE is None:                       # fall back to the repo root
+if ENV_FILE is None:                       # 저장소 루트로 대체
     candidate = Path(__file__).resolve().parents[2] / ".env"
     ENV_FILE = str(candidate) if candidate.is_file() else None
 if ENV_FILE:
@@ -37,17 +34,17 @@ def _require(name: str) -> int:
 
 
 def workers() -> int:
-    """Sinter worker processes this project may run."""
+    """이 프로젝트가 띄워도 되는 sinter worker 프로세스 수."""
     return _require("QEC_TILE_WORKERS")
 
 
 def gpu() -> int:
-    """Physical GPU index this project may use."""
+    """이 프로젝트가 써도 되는 물리 GPU 인덱스."""
     return _require("QEC_TILE_GPU")
 
 
 def threads() -> int:
-    """BLAS/OpenMP threads per process; the budget is workers() x threads()."""
+    """프로세스당 BLAS/OpenMP thread 수. 예산은 workers() x threads()."""
     return _require("QEC_TILE_THREADS")
 
 
@@ -56,10 +53,10 @@ _THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
 
 
 def apply_thread_limits() -> None:
-    """Publish threads() to the BLAS/OpenMP vars that are still unset.
+    """아직 설정되지 않은 BLAS/OpenMP 변수에 threads()를 심는다.
 
-    A no-op when QEC_TILE_THREADS is not configured: the cap protects the
-    shared host once .env exists, but never blocks importing the package.
+    QEC_TILE_THREADS가 없으면 아무 일도 하지 않는다: cap은 공유 호스트를
+    보호하는 장치일 뿐, import를 막지는 않는다.
     """
     raw = os.environ.get("QEC_TILE_THREADS")
     if raw is None or not raw.strip():

@@ -45,6 +45,11 @@ CHECK_X = "check_x"
 CHECK_Z = "check_z"
 ROUTING = "routing"
 
+# 검증에 돌리는 라운드 수. 무손실 배치는 두 라운드마다 정확히 복원되지만,
+# 줄인 배치는 첫 라운드가 과도기라 정상 궤도가 초기 상태와 다르다. 두 라운드만
+# 보면 라운드 2 이후를 한 번도 검증하지 않게 되므로 한 주기를 더 돈다.
+ROUNDS_TESTED = 4
+
 
 @dataclass(frozen=True)
 class Qubit:
@@ -246,7 +251,7 @@ def walk_layout(code, word: str) -> dict[Site, Qubit]:
     return qubit_at
 
 
-def check_windows(code, word: str) -> dict[tuple[str, int], tuple[int, int]]:
+def route_windows(code, word: str) -> dict[tuple[str, int], tuple[int, int]]:
     """각 check가 data를 처음/마지막으로 만나는 층, ``(role, index)``별로.
 
     배치를 굴리지 않고 ``h_m``으로 바로 낸다 -- ``start + h[m]``이 data 제자리인 층을
@@ -267,68 +272,159 @@ def check_windows(code, word: str) -> dict[tuple[str, int], tuple[int, int]]:
     return windows
 
 
-def prune_layout(code, word: str):
-    """죽은 앞뒤 구간을 잘라 줄인 배치 -- 논문 Appendix C의 routing 최적화.
+def shorten_route_windows(code, word: str):
+    """죽은 앞뒤 구간을 잘라 줄인 배치 -- 논문 Appendix C의 route window shortening.
 
-    ``(layout, births)``. ``births``는 ``(role, index, home, seat, first, last)``로,
-    배치에서 빼고 창이 열릴 때 태어나게 한 check들이다.
+    ``(layout, shifts)``. ``shifts``는 ``{(role, index): j}``로, 배치에서 빼고
+    ``A + S_j``에서 태어나게 한 check들이다. data의 출발점 이동은 배치 자체에 들어
+    있다 (그 열이 ``v - S_j``에 앉는다).
 
-    * **뒤** -- 창이 ``last``에서 닫히면 그 뒤로 걸을 필요가 없으므로 check 경로를
-      ``{A + S_m : m <= last+1}``까지만 깐다. 그 다음 층에 갈 자리가 없어 ``flow_step``이
-      그 자리에서 읽으므로 따로 처리할 것이 없다.
-    * **앞** -- 창이 ``first``에서 열리면 그전 구간은 죽은 걸음이다. check를 배치에서
-      빼고 ``A + S_first``에서 태어나게 하면 그 앞 구간의 routing이 필요 없어진다.
+    원문이 두 하위 단계로 적혀 있고 순서가 중요하다.
 
-    태어날 자리는 **배치에서 비워둔다**. ``flow_step``은 교환만 하므로 자리의 점유
-    여부가 라운드 내내 바뀌지 않는다 -- 비워두면 층 ``first``까지 계속 비어 있어서
-    거기 check를 넣어도 지우는 것이 없다. routing을 두면 앞에 data가 있을 때 걸어가
-    버려, 흐름에 없던 walker가 하나 늘어난다.
+    **1a** -- "Any prefix or suffix outside this active window is not needed to
+    measure the stabiliser support, so the check start position can be shifted and
+    the corresponding terminal routing sites can be removed, provided that no
+    check-start collision or data-check overlap is introduced." check만 옮기고,
+    조건은 충돌·중첩 금지뿐이다 (우리는 그걸 검증으로 확인한다).
 
-    그 자리가 data 제자리나 다른 check의 출발점이면 비울 수 없으므로 그 check는 안
-    옮긴다 (``N2ESEN2`` 4x4에서 16개 중 7개).
+    **1b** -- "We then apply the same principle to terminal routing sites **used only
+    by a single** data or check qubit q ... it is absorbed into the trajectory of q
+    by moving the appropriate start position to that site." 남은 단말 자리를 흡수하고,
+    여기에만 단수 조건이 붙는다. data는 "a data-start shift onto a former routing
+    coordinate"로 구현된다.
+
+    단수 조건을 1a에도 걸면 check가 못 움직여 훨씬 덜 빠진다 (``N2E2SESE2N2`` 17x6에서
+    248 대신 282). 순서를 지키는 것이 조건 자체보다 중요하다.
+
+    1a와 1b를 각각 고정점까지 돌린 뒤 **다시 1a로 돌아온다** -- 1b의 이동이 자리를
+    비워주면 1a가 더 옮길 수 있다. 원문 Example 4의 "combining the two optimisation
+    procedures and **repeating them** ... reduced iteratively"가 이것이다.
+
+    뒤 절단은 창 계산에서 저절로 된다: check 경로를 ``last+1``까지만 깔면 그 다음 층에
+    갈 자리가 없어 ``flow_step``이 그 자리에서 읽는다.
+
+    출발점을 한 칸 옮길 때마다 **배치를 규칙으로 다시 짓고** 검증한다. 다시 짓는 것이
+    핵심이다 -- 옮기면 필요 없어진 앞 구간이 통째로 빠지는데, 자리를 하나씩 지우며
+    검증하는 방식으로는 그 조합을 못 넘는다 (중간을 하나만 빼면 갈 데 없는 walker가
+    서고 다음 층에 겹친다).
     """
     steps = parse_directional_word(word)
+    backward = reverse_steps(steps)
     forward = partial_sums(steps)
-    backward = partial_sums(reverse_steps(steps))
-    windows = check_windows(code, word)
+    depth = len(steps)
+    crossings = walk_crossings(steps)
+    windows = route_windows(code, word)
     x_starts, z_starts = check_starts(code, word)
     start_of = {(role, index): site
                 for role, starts in ((CHECK_X, x_starts), (CHECK_Z, z_starts))
                 for index, site in enumerate(starts)}
-    data_sites = {hardware_site(edge): col
-                  for col, edge in enumerate(code.qubits)}
-    unavailable = set(data_sites) | set(start_of.values())
+    home_of = {col: hardware_site(edge)
+               for col, edge in enumerate(code.qubits)}
+    check_sites = set(start_of.values())
+    opens = {}                                 # data 열 -> 처음 먹히는 층
+    for col, (home_x, home_y) in home_of.items():
+        met = [layer for layer, (cross_x, cross_y) in enumerate(crossings)
+               if (home_x - cross_x, home_y - cross_y) in check_sites]
+        opens[col] = min(met) if met else 0
 
-    births = []
-    for key, (first, last) in sorted(windows.items()):
-        if first == 0:
-            continue
-        start = start_of[key]
-        seat = (start[0] + forward[first][0], start[1] + forward[first][1])
-        if seat in unavailable:
-            continue
-        births.append((key[0], key[1], start, seat, first, last))
-    moved = {(role, index) for role, index, *_ in births}
+    shift = {key: 0 for key in windows}        # check 출발 층
+    dshift = {col: 0 for col in home_of}       # data 출발 층
 
-    qubit_at = {site: Qubit(DATA, col, site)
-                for site, col in data_sites.items()}
-    for key, site in start_of.items():
-        if key not in moved:
-            qubit_at[site] = Qubit(key[0], key[1], site)
+    def owners() -> dict:
+        """자리 -> 그 자리를 궤적에 갖는 주체들. 단수 조건이 이걸로 판단한다."""
+        who: dict = {}
+        for key, (_, last) in windows.items():
+            start_x, start_y = start_of[key]
+            for m in range(shift[key], last + 2):
+                site = (start_x + forward[m][0], start_y + forward[m][1])
+                who.setdefault(site, set()).add(("check", key))
+        for col, (home_x, home_y) in home_of.items():
+            for m in range(dshift[col], depth + 1):
+                site = (home_x - forward[m][0], home_y - forward[m][1])
+                who.setdefault(site, set()).add(("data", col))
+        return who
 
-    path = set()
-    for key, (first, last) in windows.items():
-        start_x, start_y = start_of[key]
-        opens = first if key in moved else 0
-        path |= {(start_x + forward[m][0], start_y + forward[m][1])
-                 for m in range(opens, last + 2)}
-    path |= {(site[0] + offset_x, site[1] + offset_y)
-             for site in data_sites for offset_x, offset_y in backward}
-    seats = {seat for _, _, _, seat, _, _ in births}
-    for serial, site in enumerate(sorted(path - set(qubit_at) - seats)):
-        qubit_at[site] = Qubit(ROUTING, serial, site)
-    return qubit_at, births
+    def build() -> dict[Site, Qubit]:
+        """지금 출발 층들로 배치를 규칙대로 다시 짓는다."""
+        qubit_at = {}
+        for col, (home_x, home_y) in home_of.items():
+            seat = (home_x - forward[dshift[col]][0],
+                    home_y - forward[dshift[col]][1])
+            qubit_at[seat] = Qubit(DATA, col, seat)
+        for key, site in start_of.items():
+            if shift[key] == 0:
+                qubit_at[site] = Qubit(key[0], key[1], site)
+        born = {(start_of[key][0] + forward[shift[key]][0],
+                 start_of[key][1] + forward[shift[key]][1])
+                for key in windows if shift[key] > 0}
+        for serial, site in enumerate(sorted(set(owners()) - set(qubit_at)
+                                             - born)):
+            qubit_at[site] = Qubit(ROUTING, serial, site)
+        return qubit_at
 
+    def survives() -> bool:
+        moved = {key: j for key, j in shift.items() if j}
+        try:
+            qubit_at = build()
+            for round_index in range(ROUNDS_TESTED):
+                walk_round(code, qubit_at,
+                           steps if round_index % 2 == 0 else backward,
+                           births_for(code, word, round_index, qubit_at, moved))
+            return True
+        except ValueError:
+            return False
+
+    def advance_checks(gated: bool) -> int:
+        moved, who = 0, owners()
+        for key, (first, _) in windows.items():
+            while shift[key] < first:          # 가까운 쪽부터 한 칸씩
+                start_x, start_y = start_of[key]
+                target = (start_x + forward[shift[key] + 1][0],
+                          start_y + forward[shift[key] + 1][1])
+                if gated and who.get(target) != {("check", key)}:
+                    break
+                shift[key] += 1
+                if survives():
+                    moved += 1
+                    who = owners()
+                else:
+                    shift[key] -= 1
+                    break
+        return moved
+
+    def advance_data(gated: bool) -> int:
+        moved, who = 0, owners()
+        for col, (home_x, home_y) in home_of.items():
+            while dshift[col] < opens[col]:
+                # 한 칸 막히면 포기하지 않고 더 멀리 시도한다 -- 첫 칸이 check 편
+                # 자리라 막히고 두 칸째가 통하는 경우가 있다 (위쪽 경계 data).
+                here = dshift[col]
+                for target in range(here + 1, opens[col] + 1):
+                    seat = (home_x - forward[target][0],
+                            home_y - forward[target][1])
+                    if gated and who.get(seat) != {("data", col)}:
+                        continue
+                    dshift[col] = target
+                    if survives():
+                        moved += 1
+                        who = owners()
+                        break
+                    dshift[col] = here
+                if dshift[col] == here:
+                    break
+        return moved
+
+    if not survives():
+        raise ValueError(f"{word!r}: the standard layout does not even walk")
+    while True:
+        moved = 0
+        while advance_checks(gated=False):     # 1a
+            moved += 1
+        while advance_checks(gated=True) + advance_data(gated=True):   # 1b
+            moved += 1
+        if not moved:                          # 1b가 1a를 풀어줄 수 있어 되돌아온다
+            break
+    return build(), {key: j for key, j in shift.items() if j}
 
 def walk_round(code, qubit_at: dict[Site, Qubit], steps: list[Step],
                births=()):
@@ -344,7 +440,7 @@ def walk_round(code, qubit_at: dict[Site, Qubit], steps: list[Step],
     만나지 않는다** -- 그래서 회로가 reset을 창 시작 직전에, 측정을 창 끝 직후에
     놓아도 재는 stabilizer가 바뀌지 않는다 (Figure 4의 boundary scheduling).
 
-    ``births``는 ``prune_layout``이 배치에서 빼고 창이 열릴 때 태어나게 한 check들,
+    ``births``는 ``shorten_route_windows``이 배치에서 빼고 창이 열릴 때 태어나게 한 check들,
     ``(role, index, home, seat, first, last)``. 층 ``first``가 시작될 때 그 자리에
     check가 생긴다.
 
@@ -399,10 +495,10 @@ def dormant(layer: int, window: tuple[int, int]) -> bool:
     return layer < first or layer > last
 
 
-def round_births(code, word: str, round_index: int):
+def round_births(code, word: str, round_index: int, shifts=()):
     """그 라운드에 태어나야 하는 check 후보들.
 
-    ``prune_layout``이 줄인 배치에서는 check가 창 밖을 걷지 않는다. 앞은 배치에서
+    ``shorten_route_windows``이 줄인 배치에서는 check가 창 밖을 걷지 않는다. 앞은 배치에서
     빠져 있고, 뒤는 갈 자리가 없어 그 층에서 읽히고 ``|0>``으로 남는다. 그래서 매
     라운드 그 자리에서 다시 태어나야 한다.
 
@@ -414,140 +510,155 @@ def round_births(code, word: str, round_index: int):
 
     후보 중 실제로 태어나는 것은 그 라운드 시작 시점에 배치에 없는 것뿐이라, 줄이지
     않은 배치에서는 하나도 태어나지 않는다.
+
+    ``shifts``는 ``{(role, index): j}``로, 그 check가 ``A + S_j``에서 출발한다는 뜻이다.
+    적혀 있지 않으면 안 옮긴 것(``j = 0``)이라 배치에 그대로 앉아 있고 태어나지 않는다.
+    역 word 라운드는 ``j``와 무관하다 -- check는 여전히 ``A + S_{last+1}``에서 죽고
+    거기서 태어나며, 되돌아와 ``A + S_j``에서 잘려 제자리로 온다.
     """
     steps = parse_directional_word(word)
     forward = partial_sums(steps)
     depth = len(steps)
-    windows = check_windows(code, word)
+    windows = route_windows(code, word)
     x_starts, z_starts = check_starts(code, word)
     start_of = {(role, index): site
                 for role, starts in ((CHECK_X, x_starts), (CHECK_Z, z_starts))
                 for index, site in enumerate(starts)}
+    shifts = dict(shifts)
 
     births = []
     for key, (first, last) in sorted(windows.items()):
         if round_index % 2 == 0:
-            if first == 0:
+            born_at = shifts.get(key, 0)
+            if born_at == 0:
                 continue
-            born_at, opens, closes = first, first, last
+            opens = born_at
         else:
             if last == depth - 1:
                 continue
             born_at = last + 1
-            opens, closes = depth - 1 - last, depth - 1 - first
+            opens = depth - 1 - last
         start_x, start_y = start_of[key]
         seat = (start_x + forward[born_at][0], start_y + forward[born_at][1])
-        births.append((key[0], key[1], start_of[key], seat, opens, closes))
+        births.append((key[0], key[1], start_of[key], seat, opens, born_at))
     return births
 
 
-def births_for(code, word: str, round_index: int, layout) -> list:
+def births_for(code, word: str, round_index: int, layout, shifts=()) -> list:
     """그 라운드에 실제로 태어날 check들 -- 후보 중 배치에 없는 것.
 
     줄이지 않은 배치에서는 모든 check가 자리에 있으므로 빈 목록이다.
     """
     present = {(qubit.role, qubit.index) for qubit in layout.values()
                if qubit.role in (CHECK_X, CHECK_Z)}
-    return [birth for birth in round_births(code, word, round_index)
+    return [birth for birth in round_births(code, word, round_index, shifts)
             if (birth[0], birth[1]) not in present]
 
 
-def prune_by_testing(code, word: str, layout) -> dict[Site, Qubit]:
-    """남은 routing을 하나씩 빼보고 두 라운드가 살아남으면 채택 -- Appendix C의
-    "generating and testing".
+def trace_prune(code, word: str, layout, shifts=(),
+                     thorough: bool = False):
+    """가장자리 routing을 하나씩 지워보고 살아남으면 채택 -- Appendix C의 trace pruning.
 
-    ``prune_layout``의 구성적 규칙은 최소가 아니다. 규칙이 남기는 자리 중에는 그
-    자리를 지나가던 walker가 실은 없어도 되는 것이 있는데, 그건 기하에 따라 달라
-    정적 규칙으로 잡기 어렵다. 돌려보는 편이 확실하다.
+    "After each proposed removal, we try to greedily remove more routing qubits, by
+    iteratively deleting routing qubits near the edges of the layout ... We then run
+    the directional syndrome extraction normally for two rounds (forwards and
+    backwards) and accept the move only if every stabiliser still interacts with
+    exactly the data qubits specified by the original parity-check matrix."
 
-    채택 기준은 논문과 같다: "The optimisation preserves the measured stabiliser
-    supports, detectors and logical observables" -- word와 역 word 한 라운드씩 돌려
-    각 check가 여전히 자기 ``HX``/``HZ`` 행을 먹으면 채택한다 (``walk_round``가 안에서
-    대조하므로 통과하는 것 자체가 기준이다).
+    ``shorten_route_windows``의 창 절단은 최소가 아니다. 그 규칙이 남기는 자리 중에는 지나가던
+    walker가 실은 없어도 되는 것이 있는데, 기하에 따라 달라 정적 규칙으로 잡기 어렵다.
+    돌려보는 편이 확실하다. 원문의 직관: "even though in the original layout some
+    routing qubits might appear necessary, through the displacement of early
+    directional word steps, their neighbour routing qubits can fill the gap instead".
 
-후보 이동은 셋이다.
+    **삭제만** 한다. 출발점 이동은 ``shorten_route_windows``이 고정점까지 하므로 여기서 다시
+    시도해도 하나도 안 움직인다 (논문 코드 다섯 개에서 추가 이동 0회, 결과도 삭제만과
+    동일). 원문의 단계 구분도 그렇다 -- 이동은 route window shortening 소속이다.
 
-    1. **routing 삭제** -- 그 자리를 지나가던 walker가 실은 없어도 되는 경우.
-    2. **check 이동** -- 배치에서 빼기만 하면 ``births_for``가 창이 열리는 자리에서
-       태어나게 한다. 죽은 앞 구간을 안 걷게 되므로 그 구간의 routing이 후보가 된다.
-    3. **data 이동** -- 창이 층 ``first``에 열리는 data를 ``v - S_first``로 옮긴다.
-       그 자리의 routing을 흡수하고, 옮긴 뒤에는 창이 열릴 때까지 밀어줄 walker가
-       없어 가만히 있다가 원래와 같은 자리에서 먹힌다.
+    배치 중심에서 먼 순으로("near the edges") 시도하고, 하나도 못 지우는 패스가 나올
+    때까지 반복한다. 하나를 지우면 다른 자리가 지울 수 있게 되기도 한다.
 
-    바깥쪽부터 시도하고, 하나도 못 바꾸는 패스가 나올 때까지 반복한다. 셋이 서로를
-    풀어주므로 반복이 중요하다 -- 삭제와 data 이동이 check를 옮길 수 있게 만들고, check를
-    옮기면 그 앞 구간이 다시 삭제 후보가 된다. ``N2E2SESE2N2`` 17x6에서 routing이
-    295에서 240으로, 한 번만 훑는 것보다 44개 더 빠진다.
+    ``thorough``면 시도 순서를 바꿔 후보를 셋 만들고 물리 qubit이 가장 적은 것을 고른다
+    (논문의 "several candidate circuits ... with different update orders"). 논문 코드
+    다섯 개에서는 셋이 같은 값으로 수렴해 얻는 것이 없고 세 배 느리기만 하다.
     """
     steps = parse_directional_word(word)
     backward = reverse_steps(steps)
-    forward = partial_sums(steps)
-    crossings = walk_crossings(steps)
-    x_starts, z_starts = check_starts(code, word)
-    starts = set(x_starts) | set(z_starts)
-    home_of = {col: hardware_site(edge)
-               for col, edge in enumerate(code.qubits)}
-    opens = {}                                 # 열 -> 처음 먹히는 층
-    for col, (home_x, home_y) in home_of.items():
-        met = [layer for layer, (cross_x, cross_y) in enumerate(crossings)
-               if (home_x - cross_x, home_y - cross_y) in starts]
-        opens[col] = min(met) if met else 0
 
-    def survives(trial) -> bool:
+    def survives(trial, moved) -> bool:
         try:
             qubit_at = dict(trial)
-            for round_index, these in enumerate((steps, backward)):
-                walk_round(code, qubit_at, these,
-                           births_for(code, word, round_index, qubit_at))
+            for round_index in range(ROUNDS_TESTED):
+                walk_round(code, qubit_at,
+                           steps if round_index % 2 == 0 else backward,
+                           births_for(code, word, round_index, qubit_at, moved))
             return True
         except ValueError:
             return False
 
-    layout = dict(layout)
-    data_sites = [site for site, qubit in layout.items()
+    reference = walk_memory_z_base(code, word, 2, walk_layout(code, word))
+
+    def acceptable(candidate) -> bool:
+        """최종 후보의 채택 기준 -- 원문 그대로.
+
+        "The final candidate is accepted only if the measured stabiliser supports,
+        detectors, and logical observables are unchanged, and if the detector error
+        model remains deterministic."
+
+        support는 삭제마다 ``walk_round``가 보므로 여기서는 나머지 셋을 본다: 줄이지
+        않은 회로와 detector·observable 수가 같은지, 그리고 DEM이 결정적인지. support가
+        멀쩡해도 창을 잘못 잡아 reset이나 측정이 엉뚱한 moment에 놓이면 detector가
+        비결정적이 될 수 있고, 그러면 stim이 DEM을 못 만든다.
+        """
+        try:
+            circuit = walk_memory_z_base(code, word, 2, *candidate)
+            return ((circuit.num_detectors, circuit.num_observables)
+                    == (reference.num_detectors, reference.num_observables)
+                    and circuit.detector_error_model().num_detectors
+                    == circuit.num_detectors)
+        except ValueError:
+            return False
+
+    start_layout, start_shifts = dict(layout), dict(shifts)
+    data_sites = [site for site, qubit in start_layout.items()
                   if qubit.role == DATA]
     center_x = sum(x for x, _ in data_sites) / len(data_sites)
     center_y = sum(y for _, y in data_sites) / len(data_sites)
+    far = lambda site: -((site[0] - center_x) ** 2 + (site[1] - center_y) ** 2)
+    orders = (far,                              # 가장자리부터
+              lambda site: -far(site),          # 안쪽부터
+              lambda site: (site[0], site[1]))  # 열 순서
+    if not thorough:
+        orders = orders[:1]
 
-    def outermost(roles):
-        """그 역할의 자리를 배치 중심에서 먼 순으로. 가장자리부터 시도한다."""
-        return sorted((site for site, qubit in layout.items()
-                       if qubit.role in roles),
-                      key=lambda site: -((site[0] - center_x) ** 2
-                                         + (site[1] - center_y) ** 2))
+    def run(order):
+        """한 후보. 하나도 못 지우는 패스가 나올 때까지 반복한다."""
+        layout, shifts = dict(start_layout), dict(start_shifts)
+        while True:
+            changed = 0
+            for site in sorted((site for site, qubit in layout.items()
+                                if qubit.role == ROUTING), key=order):
+                kept = layout.pop(site)
+                if survives(layout, shifts):
+                    changed += 1
+                else:
+                    layout[site] = kept
+            if not changed:
+                return layout, shifts
 
-    while True:
-        changed = 0
-        for site in outermost((ROUTING, CHECK_X, CHECK_Z)):
-            if site not in layout:             # 앞선 이동으로 이미 사라졌다
-                continue
-            kept = layout.pop(site)
-            if survives(layout):
-                changed += 1
-            else:
-                layout[site] = kept
-        for site in outermost((DATA,)):
-            qubit = layout.get(site)
-            if qubit is None or qubit.role != DATA:
-                continue
-            first = opens[qubit.index]
-            home = home_of[qubit.index]
-            seat = (home[0] - forward[first][0], home[1] - forward[first][1])
-            if first == 0 or seat == site:
-                continue
-            if layout.get(seat) is None or layout[seat].role != ROUTING:
-                continue
-            trial = dict(layout)
-            trial[seat] = Qubit(DATA, qubit.index, seat)
-            trial[site] = Qubit(ROUTING, -1, site)
-            if survives(trial):
-                layout = trial
-                changed += 1
-        if not changed:
-            return layout
+    best = None
+    for order in orders:
+        candidate = run(order)
+        if not acceptable(candidate):
+            continue
+        size = len(candidate[0]) + len(candidate[1])
+        if best is None or size < best[0]:
+            best = (size, candidate)
+    if best is None:                           # 하나도 통과 못 하면 안 줄인다
+        return start_layout, start_shifts
+    return best[1]
 
-
-def walk_schedule(code, word: str, rounds: int, layout=None):
+def walk_schedule(code, word: str, rounds: int, layout=None, shifts=()):
     """``rounds`` 번을 미리 돌려 언제 어디서 무엇을 할지 확정한다.
 
     ``(schedule, initial, final_data)``. ``schedule[r]``은 moment 리스트이고 moment
@@ -576,7 +687,7 @@ def walk_schedule(code, word: str, rounds: int, layout=None):
         position = {(qubit.role, qubit.index): site
                     for site, qubit in layout.items()
                     if qubit.role in (CHECK_X, CHECK_Z)}
-        births = births_for(code, word, round_index, layout)
+        births = births_for(code, word, round_index, layout, shifts)
         layers, windows = walk_round(
             code, layout, steps if round_index % 2 == 0 else backward, births)
         moments = [([], [], []) for _ in range(len(layers) + 2)]
@@ -616,8 +727,8 @@ def walk_schedule(code, word: str, rounds: int, layout=None):
     return schedule, initial, final_data
 
 
-def walk_memory_z_base(code, word: str, rounds: int,
-                       layout=None) -> stim.Circuit:
+def walk_memory_z_base(code, word: str, rounds: int, layout=None,
+                       shifts=()) -> stim.Circuit:
     """walk 스케줄로 짓는 잡음 없는 memory-Z 회로.
 
     ``circuit.py``의 ``memory_z_base``와 계약이 같다: moment를 TICK으로 갈라
@@ -631,7 +742,8 @@ def walk_memory_z_base(code, word: str, rounds: int,
     gate에 한 번도 나오지 않는 routing은 회로에서 뺀다. ``|0>``인 채로 아무와도 닿지
     않아 detector에 영향이 없고, 넣으면 qubit 수만 부푼다.
     """
-    schedule, initial, final_data = walk_schedule(code, word, rounds, layout)
+    schedule, initial, final_data = walk_schedule(code, word, rounds, layout,
+                                                  shifts)
     _, LZ = code.logicals()
 
     used = {site for moments in schedule

@@ -1,4 +1,4 @@
-"""Circuit-level memory-Z experiment built with stim."""
+"""stim으로 지은 circuit-level memory-Z 실험."""
 import numpy as np
 import pytest
 
@@ -24,7 +24,7 @@ def test_detector_and_observable_counts():
 
 
 def test_zero_noise_is_silent():
-    """Without noise no detector fires and no observable flips."""
+    """잡음이 없으면 detector도 울리지 않고 observable도 뒤집히지 않는다."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=3, p=0.0)
     sampler = circuit.compile_detector_sampler()
@@ -42,8 +42,8 @@ def test_noise_fires_detectors():
 
 
 def test_dem_extraction_works():
-    """stim can build a detector error model — schedule and detectors are
-    consistent (a broken detector definition raises here)."""
+    """stim이 detector error model을 만들 수 있다 — 스케줄과 detector가 서로
+    맞는다는 뜻이다 (detector 정의가 깨졌으면 여기서 예외가 난다)."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=3, p=0.01)
     dem = circuit.detector_error_model()
@@ -58,8 +58,8 @@ def test_rounds_must_be_positive():
 
 
 def test_every_qubit_has_coordinates():
-    """The timeslice diagram draws the real lattice only if all qubits have
-    distinct coordinates."""
+    """모든 qubit이 서로 다른 좌표를 가질 때만 timeslice 그림이 실제 격자를
+    그린다."""
     code = paper_code(*SMALL)
     circuit = memory_z_base(code, rounds=1)
     coords = circuit.get_final_qubit_coordinates()
@@ -68,7 +68,7 @@ def test_every_qubit_has_coordinates():
 
 
 def test_zero_noise_circuit_never_fails():
-    """No noise -> no error mechanisms in the DEM -> nothing can fail."""
+    """잡음 없음 -> DEM에 error mechanism 없음 -> 실패할 수 없음."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=2, p=0.0)
     assert circuit_failure_rate(circuit, shots=20, decoder="bposd_cs7",
@@ -76,7 +76,7 @@ def test_zero_noise_circuit_never_fails():
 
 
 def test_circuit_rate_is_deterministic_given_a_seed():
-    """Same stim sampler seed and decoder -> identical outcome."""
+    """stim sampler 시드와 디코더가 같으면 결과가 동일하다."""
     code = paper_code(*SMALL)
     circuit = memory_z_circuit(code, rounds=2, p=0.01)
     a = circuit_failure_rate(circuit, shots=50, decoder="bposd_cs7", seed=3)
@@ -85,7 +85,7 @@ def test_circuit_rate_is_deterministic_given_a_seed():
 
 
 def test_circuit_rate_grows_with_p():
-    """Wiring smoke test.  Measured: 0.007 vs 0.94 — a >100x margin."""
+    """배선 확인용 smoke test. 실측: 0.007 대 0.94 — 100배 넘는 여유."""
     code = paper_code(*SMALL)
     low = circuit_failure_rate(memory_z_circuit(code, rounds=2, p=0.002),
                                shots=150, decoder="bposd_cs7", seed=1)
@@ -96,11 +96,11 @@ def test_circuit_rate_grows_with_p():
 
 @pytest.mark.slow
 def test_circuit_distance_is_not_halved():
-    """The schedule must not introduce hook errors below half the distance.
+    """스케줄이 hook 오류를 만들어 거리를 절반 아래로 떨어뜨리면 안 된다.
 
-    b3w6 at 4x4 has code distance 4 (X sector); a bad CNOT order could halve
-    the circuit-level distance.  We check d_circuit >= 3 by exhaustive search
-    over up to 2 simultaneous faults.
+    4x4의 b3w6은 부호 거리가 4다(X sector). CNOT 순서가 잘못되면 circuit-level
+    거리가 반토막날 수 있다. 동시 결함 2개까지 전수 탐색해 d_circuit >= 3을
+    확인한다.
     """
     import stim
     code = paper_code(*SMALL)

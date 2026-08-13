@@ -1,4 +1,4 @@
-"""Linear algebra over GF(2)."""
+"""GF(2) 선형대수."""
 import numpy as np
 
 from qec_tile.gf2 import nullspace2, quotient_basis, rank2, rref2
@@ -8,8 +8,8 @@ def test_rank2_small_by_hand():
     M = np.array([[1, 1, 0],
                   [0, 1, 1],
                   [1, 0, 1]], dtype=np.uint8)
-    assert rank2(M) == 2                       # row 3 = row 1 XOR row 2
-    assert np.linalg.matrix_rank(M.astype(float)) == 3   # but rank 3 over R
+    assert rank2(M) == 2                       # 3행 = 1행 XOR 2행
+    assert np.linalg.matrix_rank(M.astype(float)) == 3   # 하지만 R 위에서는 rank 3
 
 
 def test_rank2_edge_cases():

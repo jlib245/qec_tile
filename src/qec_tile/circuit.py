@@ -1,23 +1,22 @@
-"""Circuit-level memory-Z experiment for a tile code, built with stim.
+"""tile code의 circuit-level memory-Z 실험. stim으로 짓는다.
 
-One round measures every X stabilizer, then every Z stabilizer, each with its
-own ancilla.  The CNOT schedule exploits translation invariance: a global
-ordering of the tile's offsets is fixed, and at time slot ``o`` every check
-touches the qubit at ``anchor + o``.  Since ``anchor + o`` determines the
-anchor, two checks of the same type can never collide in a slot; truncated
-boundary checks simply skip the slots they lost.  X and Z layers are kept in
-disjoint slots (depth ~ 2w), trading depth for scheduling simplicity.
+한 라운드는 X stabilizer 전부, 이어서 Z stabilizer 전부를 각자의 ancilla로
+측정한다. CNOT 스케줄은 병진 대칭성을 이용한다: tile 오프셋의 전역 순서를 하나
+고정하고, 시간 슬롯 ``o``에서 모든 check가 ``anchor + o``의 qubit을 건드린다.
+``anchor + o``가 anchor를 결정하므로 같은 타입의 check 둘이 한 슬롯에서 충돌하는
+일은 없다. 잘려나간 경계 check는 잃어버린 슬롯을 그냥 건너뛴다. X 층과 Z 층은
+겹치지 않는 슬롯에 두어(depth ~ 2w), 깊이를 내주고 스케줄링의 단순함을 얻는다.
 
-``memory_z_base`` emits the circuit noise-free with TICKs between moments;
-noise is a post-processing step through ``noise_model.NoiseModel`` (vendored
-Gidney implementation), which injects gate noise plus per-moment idle noise.
-``memory_z_circuit`` keeps the simple uniform-``p`` model as a wrapper, and
-``NoiseModel.SI1000(p)`` gives the superconducting-inspired canonical model.
+``memory_z_base``는 moment 사이에 TICK을 넣어 잡음 없는 회로를 뱉는다. 잡음은
+``noise_model.NoiseModel``(Gidney 구현을 vendored)을 통한 후처리 단계이고, gate
+잡음과 moment별 idle 잡음을 주입한다. ``memory_z_circuit``은 단순한 균일 ``p``
+모델을 wrapper로 남겨둔 것이고, ``NoiseModel.SI1000(p)``이 초전도 기반의 표준
+모델을 준다.
 
-Detectors: data start in |0>, so Z-check outcomes are deterministic in round
-one and compared round-to-round afterwards; X-check outcomes only from round
-two on; a final transversal Z readout reconstructs each Z check once more.
-The k observables are the LZ rows applied to that final readout.
+detector: data가 |0>에서 시작하므로 Z-check 결과는 첫 라운드에서 결정적이고 그
+뒤로는 라운드끼리 비교한다. X-check 결과는 두 번째 라운드부터만 쓴다. 마지막의
+transversal Z readout이 각 Z check를 한 번 더 재구성한다. k개 observable은 그 최종
+readout에 LZ 행을 적용한 것이다.
 """
 from __future__ import annotations
 
@@ -30,7 +29,7 @@ from .noise_model import NoiseModel
 
 
 def _schedule(H, anchors, qubits) -> tuple[list, list[dict]]:
-    """Global time slots (tile offsets) and, per check, offset -> data column."""
+    """전역 시간 슬롯(tile 오프셋)과, check마다 오프셋 -> data 열."""
     per_check: list[dict] = []
     slots = set()
     for row, (anchor_x, anchor_y) in zip(np.asarray(H), anchors):
@@ -45,10 +44,10 @@ def _schedule(H, anchors, qubits) -> tuple[list, list[dict]]:
 
 
 def memory_z_base(code, rounds: int) -> stim.Circuit:
-    """Noise-free memory-Z circuit for ``rounds`` syndrome rounds.
+    """``rounds``번의 syndrome 라운드에 대한 잡음 없는 memory-Z 회로.
 
-    Moments are separated by TICKs so a ``noise_model.NoiseModel`` can inject
-    gate noise and, crucially, idle noise per moment as a post-processing step.
+    moment를 TICK으로 갈라놓아 ``noise_model.NoiseModel``이 후처리로 gate 잡음과,
+    무엇보다 moment별 idle 잡음을 주입할 수 있게 한다.
     """
     if rounds < 1:
         raise ValueError("rounds must be >= 1")
@@ -62,9 +61,9 @@ def memory_z_base(code, rounds: int) -> stim.Circuit:
     _, LZ = code.logicals()
 
     circuit = stim.Circuit()
-    # Coordinates make stim's timeslice diagrams draw the actual lattice:
-    # data qubits at edge midpoints, ancillas inside their anchor's box
-    # (0.25/0.75 offsets keep bulk X and Z ancillas apart).
+    # 좌표를 붙여두면 stim의 timeslice 그림이 실제 격자를 그린다: data qubit은 edge
+    # 중점에, ancilla는 자기 anchor의 box 안에 (0.25/0.75 오프셋이 bulk의 X와 Z
+    # ancilla를 떼어놓는다).
     for col, (orient, x, y) in enumerate(code.qubits):
         xy = (x + 0.5, y) if orient == "H" else (x, y + 0.5)
         circuit.append("QUBIT_COORDS", [col], xy)
@@ -75,32 +74,32 @@ def memory_z_base(code, rounds: int) -> stim.Circuit:
         circuit.append("QUBIT_COORDS", [z_anc[j]],
                        (anchor_x + 0.75, anchor_y + 0.75))
 
-    circuit.append("R", data + z_anc)          # |0> data and Z ancillas
-    circuit.append("RX", x_anc)                # |+> X ancillas
+    circuit.append("R", data + z_anc)          # |0> data와 Z ancilla
+    circuit.append("RX", x_anc)                # |+> X ancilla
     circuit.append("TICK")
 
     for round_index in range(rounds):
-        # X layer: ancilla is the control (measures X on its support).
+        # X 층: ancilla가 control이다 (자기 support에서 X를 측정).
         for slot in x_slots:
             pairs = [q for i, offsets in enumerate(x_checks)
                      if slot in offsets for q in (x_anc[i], offsets[slot])]
             circuit.append("CX", pairs)
             circuit.append("TICK")
-        # Z layer: data is the control.
+        # Z 층: data가 control이다.
         for slot in z_slots:
             pairs = [q for j, offsets in enumerate(z_checks)
                      if slot in offsets for q in (offsets[slot], z_anc[j])]
             circuit.append("CX", pairs)
             circuit.append("TICK")
 
-        # Measure and reset the ancillas (mx results, then mz).
+        # ancilla를 측정하고 reset한다 (mx개 결과, 그다음 mz개).
         circuit.append("MRX", x_anc)
         circuit.append("MR", z_anc)
 
-        stride = mx + mz                       # measurements per round
+        stride = mx + mz                       # 라운드당 측정 수
         for j in range(mz):
             current = -(mz - j)
-            if round_index == 0:               # deterministic against |0>
+            if round_index == 0:               # |0>에 대해 결정적
                 circuit.append("DETECTOR", [stim.target_rec(current)])
             else:
                 circuit.append("DETECTOR", [stim.target_rec(current),
@@ -112,7 +111,7 @@ def memory_z_base(code, rounds: int) -> stim.Circuit:
                                             stim.target_rec(current - stride)])
         circuit.append("TICK")
 
-    # Final transversal Z readout of the data reconstructs each Z check.
+    # data의 마지막 transversal Z readout이 각 Z check를 재구성한다.
     circuit.append("M", data)
     for j in range(mz):
         targets = [stim.target_rec(-(n - col))
@@ -127,11 +126,11 @@ def memory_z_base(code, rounds: int) -> stim.Circuit:
 
 
 def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
-    """Memory-Z circuit under uniform noise: every gate, measurement and reset
-    fails with probability ``p``, no idle noise.
+    """균일 잡음 아래의 memory-Z 회로: 모든 gate, 측정, reset이 확률 ``p``로
+    실패하고 idle 잡음은 없다.
 
-    Kept for the "circuit" benchmark axis; the canonical alternative is
-    ``NoiseModel.SI1000(p).noisy_circuit(memory_z_base(code, rounds))``.
+    "circuit" 벤치마크 축을 위해 남겨둔다. 표준 대안은
+    ``NoiseModel.SI1000(p).noisy_circuit(memory_z_base(code, rounds))``다.
     """
     uniform = NoiseModel(
         idle=0.0,
@@ -143,18 +142,17 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
 
 def circuit_failure_rate(circuit: stim.Circuit, shots: int, decoder: str,
                          seed: int | None = None) -> float:
-    """Sample the circuit itself and decode its detection events.
+    """회로 자체를 샘플링해 그 detection event를 디코딩한다.
 
-    The decoder works on the detector error model's matrices, but the events
-    come from stim sampling the actual circuit — the DEM is used as the
-    decoder's map, not as the noise source.  A shot fails when the observable
-    flips predicted from the decoded error disagree with the sampled ones
-    (equivalent to the residual test, without needing the true error).
+    디코더는 detector error model의 행렬 위에서 일하지만, event는 stim이 실제 회로를
+    샘플링해서 나온다 — DEM은 디코더의 지도로 쓰이고 잡음원이 아니다. 디코딩된
+    오류에서 예측한 observable 뒤집힘이 샘플된 것과 어긋나면 그 shot은 실패다
+    (참 오류를 몰라도 되는, residual 판정과 동등한 검사).
     """
     dem = circuit.detector_error_model()
     matrices = detector_error_model_to_check_matrices(
-        dem, allow_undecomposed_hyperedges=True)   # BP+OSD takes hyperedges
-    if matrices.check_matrix.shape[1] == 0:        # noiseless: nothing to fail
+        dem, allow_undecomposed_hyperedges=True)   # BP+OSD는 hyperedge를 받는다
+    if matrices.check_matrix.shape[1] == 0:        # 잡음 없음: 실패할 것이 없다
         return 0.0
 
     build = DECODERS.get(decoder)

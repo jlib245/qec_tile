@@ -47,7 +47,8 @@ Site = tuple[int, int]
 DATA = "data"
 CHECK_X = "check_x"
 CHECK_Z = "check_z"
-ROUTING = "routing"
+ROUTING = "routing"   # 경계 data를 실어나르는 셔틀. 걷는다.
+FILLER = "filler"     # check가 밟고 지나갈 디딤돌. 밀리기만 한다.
 
 
 @dataclass(frozen=True)
@@ -57,25 +58,9 @@ class Qubit:
     role: str          # DATA | CHECK_X | CHECK_Z | ROUTING
     index: int         # DATA는 code.qubits 열, CHECK_*는 HX/HZ 행, ROUTING은 일련번호
     home: Site         # 라운드를 시작할 때 앉아 있던 site
-    pushes: bool = True    # 밀어줄 data가 없는 디딤돌 routing은 False
 
-    @property
-    def walks(self) -> bool:
-        """
-        좌표합이 짝수인 자리에서 출발했고, 밀 일이 있는 qubit만 스스로 걷는다.
-        걷는 도중에는 지금 site의 parity가 뒤집히므로 home으로 따진다.
-
-        routing이 하는 일이 둘인데 걷기가 필요한 건 하나뿐이다. check가 밟고 지나갈
-        자리를 채우는 디딤돌은 밀려나기만 하면 되고, 경계 data를 check 앞으로
-        실어나르는 놈만 걷는다. 걷다 마는 walker가 있으면 그 하나만 phase가 뒤처져
-        다음 층에 뒤따르던 walker와 같은 자리를 두고 겹치므로, 걸을 일이 없으면
-        처음부터 안 걷는 편이 낫다.
-        """
-        return self.pushes and sum(self.home) % 2 == 0
-
-
-def flow_step(qubit_at: dict[Site, Qubit],
-              step: tuple[int, int]) -> list[tuple[str, Site, Site]]:
+def flow_step(qubit_at: dict[Site, Qubit], step: tuple[int, int],
+              layer: int | None = None) -> list[tuple[str, Site, Site]]:
     """
     step 한 층. gate 목록을 돌려주고 qubit_at을 제자리에서 갱신한다.
 
@@ -97,7 +82,7 @@ def flow_step(qubit_at: dict[Site, Qubit],
     for site, qubit in qubit_at.items(): # qubit_at : 해당 자리에 있는 qubit
         if qubit.role in (CHECK_X, CHECK_Z):
             checks.append((site, qubit.role))
-        elif qubit.role == ROUTING and qubit.walks:
+        elif qubit.role == ROUTING:
             routing.append(site)
     checks.sort()
     routing.sort()
@@ -122,7 +107,7 @@ def flow_step(qubit_at: dict[Site, Qubit],
                 gates.append(("CXSWAP", site, target))
             else:
                 gates.append(("CXSWAP", target, site))  # X는 check가, Z는 data가 control
-        elif met == ROUTING:
+        elif met in (ROUTING, FILLER):
             gates.append(("SWAP", site, target))
         else:
             raise ValueError(f"{site} -> {target}: two checks meet, so the walk geometry is broken")
@@ -131,13 +116,12 @@ def flow_step(qubit_at: dict[Site, Qubit],
     for site in routing:                               # 16-20행
         target = (site[0] + step[0], site[1] + step[1])
         if target not in qubit_at:
-            continue                                   # 테두리의 routing은 그냥 선다
+            continue
         met = qubit_at[target].role
-        if met in (CHECK_X, CHECK_Z):
-            raise ValueError(f"{site} -> {target}: routing walks into a check, so the walk geometry is broken")
         if met == DATA:
-            gates.append(("SWAP", site, target))
-        # routing끼리는 |0> 둘의 교환이라 gate가 없다. 그래도 자리는 바꿔야 lockstep이 유지된다.
+            gates.append(("SWAP", site, target))       # 16-19행
+        # 디딤돌을 지나갈 때는 |0> 둘의 교환이라 gate가 없다. 그래도 자리는 바꾼다 --
+        # 셔틀이 한 층 쉬면 그만 뒤처져 다음 층에 남의 자리를 밟는다.
         claim(site, target)
 
     for site, target in moves:
@@ -249,20 +233,143 @@ def walk_layout(code, word: str) -> dict[Site, Qubit]:
     for row, site in enumerate(z_starts):
         qubit_at[site] = Qubit(CHECK_Z, row, site)
 
-    seats = set(x_starts) | set(z_starts)
+    data_sites = {site for site, qubit in qubit_at.items() if qubit.role == DATA}
+    check_seats = set(x_starts) | set(z_starts)
+
+    def last_meeting(seat):
+        """그 자리에서 출발한 walker가 마지막으로 data를 만나는 layer (없으면 -1)."""
+        met = [layer for layer, (cross_x, cross_y) in enumerate(crossings)
+               if (seat[0] + cross_x, seat[1] + cross_y) in data_sites]
+        return max(met) if met else -1
+
+    seats = set(check_seats)
     seats |= {(site[0] - cross_x, site[1] - cross_y)   # data를 밀어줄 walker
-              for site, qubit in qubit_at.items() if qubit.role == DATA
-              for cross_x, cross_y in crossings}
+              for site in data_sites for cross_x, cross_y in crossings}
     empty = {(seat[0] + offset_x, seat[1] + offset_y)
              for seat in seats for offset_x, offset_y in trajectory}
     empty -= set(qubit_at)
 
     for routing, site in enumerate(sorted(empty)):
-        qubit_at[site] = Qubit(ROUTING, routing, site, pushes=site in seats)
+        # 밀어줄 data가 있는 자리(seat)만 셔틀이고 나머지는 디딤돌이다. 자리의
+        # 홀짝이 아니라 할 일이 있느냐로 가른다.
+        qubit_at[site] = Qubit(ROUTING if site in seats else FILLER,
+                               routing, site)
     return qubit_at
 
 
-def walk_round(code, qubit_at: dict[Site, Qubit], steps: list[tuple[int, int]]):
+def prune_routing(code, word: str, layout: dict[Site, Qubit] | None = None,
+                  shift: bool = True):
+    """지우고 검증하며 배치를 줄인다 -- 논문 Appendix C의 "generating and testing".
+
+    후보 둘을 번갈아 시도하고, 시도마다 두 라운드(word와 역 word)를 돌려 각 check가
+    여전히 자기 ``HX``/``HZ`` 행을 먹으면 채택한다. 논문의 채택 기준과 같다:
+    "The optimisation preserves the measured stabiliser supports, detectors and
+    logical observables".
+
+    * **옮기기** (route window shortening) -- 창이 ``first``층에 열리는 check를
+      ``출발점 + S_first``로 옮기고 그때부터 걷게 한다. ``first``층 이후의 자취가
+      원래와 같으므로 support는 그대로이고, 죽은 앞 구간이 사라져 그 자리의 routing이
+      지울 수 있는 후보가 된다.
+    * **지우기** -- routing site 하나를 빼고 돌려본다. 바깥쪽부터 시도한다.
+
+    정적 규칙으로 강제하지 않는 이유는, 옮기거나 지운 자리를 지나가던 walker가
+    있으면 흐름이 깨지는데 그게 기하에 따라 다르기 때문이다. 돌려보는 편이 확실하다.
+    """
+    steps = parse_directional_word(word)
+    backward = [(-step_x, -step_y) for step_x, step_y in reversed(steps)]
+    crossings = walk_crossings(steps)
+    trajectory = [(0, 0)]
+    for (step_x, step_y) in steps:
+        trajectory.append((trajectory[-1][0] + step_x,
+                           trajectory[-1][1] + step_y))
+    if layout is None:
+        layout = walk_layout(code, word)
+    data_sites = {site for site, qubit in layout.items() if qubit.role == DATA}
+
+    def survives():
+        try:
+            qubit_at = dict(layout)
+            walk_round(code, qubit_at, steps)
+            walk_round(code, qubit_at, backward)
+            return True
+        except ValueError:
+            return False
+
+    def window_at(start, crossings_of_round):
+        """그 자리에서 출발한 check의 (first, last). data를 하나도 안 만나면 None."""
+        met = [layer for layer, (cross_x, cross_y) in enumerate(crossings_of_round)
+               if (start[0] + cross_x, start[1] + cross_y) in data_sites]
+        return (met[0], met[-1]) if met else None
+
+    back_crossings = walk_crossings(backward)
+    back_trajectory = [(0, 0)]
+    for (step_x, step_y) in backward:
+        back_trajectory.append((back_trajectory[-1][0] + step_x,
+                                back_trajectory[-1][1] + step_y))
+    end = trajectory[-1]
+
+    def births_for(reborn):
+        """옮긴 check들의 라운드별 탄생 기록. 역 word 라운드는 끝 자리에서 다시 센다."""
+        forward, back = [], []
+        for role, index, start in reborn:
+            window = window_at(start, crossings)
+            if window:
+                first, last = window
+                forward.append((role, index, start,
+                                (start[0] + trajectory[first][0],
+                                 start[1] + trajectory[first][1]), first, last))
+            # 역 라운드에서는 data가 이미 -S_w만큼 밀려 있다. 창도 그 자리 기준이다.
+            far = (start[0] + end[0], start[1] + end[1])
+            window = window_at((far[0] + end[0], far[1] + end[1]), back_crossings)
+            if window:
+                first, last = window
+                back.append((role, index, start,
+                             (far[0] + back_trajectory[first][0],
+                              far[1] + back_trajectory[first][1]), first, last))
+        return forward, back
+
+    def survives(reborn=()):
+        forward, back = births_for(reborn)
+        try:
+            qubit_at = dict(layout)
+            walk_round(code, qubit_at, steps, forward)
+            walk_round(code, qubit_at, backward, back, phase=len(steps))
+            return True
+        except ValueError:
+            return False
+
+    center_x = sum(x for x, _ in data_sites) / len(data_sites)
+    center_y = sum(y for _, y in data_sites) / len(data_sites)
+    reborn = []                                # 배치에서 빼고 탄생으로 돌린 check
+    while True:
+        changed = 0
+        for site in ([s for s, q in layout.items()
+                      if q.role in (CHECK_X, CHECK_Z)] if shift else []):
+            window = window_at(site, crossings)
+            if not window or window[0] == 0:
+                continue
+            check = layout[site]
+            layout[site] = Qubit(ROUTING, -1, site)
+            reborn.append((check.role, check.index, site))
+            if survives(reborn):
+                changed += 1
+            else:
+                layout[site] = check
+                reborn.pop()
+        for site in sorted((s for s, q in layout.items() if q.role == ROUTING),
+                           key=lambda s: -((s[0] - center_x) ** 2
+                                           + (s[1] - center_y) ** 2)):
+            kept = layout.pop(site)
+            if survives(reborn):
+                changed += 1
+            else:
+                layout[site] = kept
+        if not changed:
+            return layout, reborn
+
+
+def walk_round(code, qubit_at: dict[Site, Qubit],
+               steps: list[tuple[int, int]], births=(), phase: int = 0):
     """한 라운드. ``(층별 gate, check별 활성 구간)``을 돌려주고 ``qubit_at``을 갱신한다.
 
     돌면서 각 check가 CXSWAP한 data 열을 모아 ``HX``/``HZ``의 그 행과 대조한다.
@@ -283,7 +390,15 @@ def walk_round(code, qubit_at: dict[Site, Qubit], steps: list[tuple[int, int]]):
     windows: dict[tuple[str, int], tuple[int, int]] = {}
     layers = []
     for layer, step in enumerate(steps):
-        gates = flow_step(qubit_at, step)
+        for role, index, home, site, first, last in births:
+            # 창이 열릴 때 그 자리의 |0>이 check가 된다. 그전에는 check라는 것이
+            # 없으므로, 지나가던 walker가 그 자리를 밟아도 그냥 SWAP이다.
+            if first == layer:
+                if site not in qubit_at:
+                    raise ValueError(f"{site}: a check is born where the layout "
+                                     f"has no qubit")
+                qubit_at[site] = Qubit(role, index, home)
+        gates = flow_step(qubit_at, step, phase + layer)
         for name, first, second in gates:
             if name != "CXSWAP":
                 continue
@@ -293,6 +408,11 @@ def walk_round(code, qubit_at: dict[Site, Qubit], steps: list[tuple[int, int]]):
             collected[(check.role, check.index)].add(data.index)
             opened = windows.get((check.role, check.index), (layer, layer))[0]
             windows[(check.role, check.index)] = (opened, layer)
+        for role, index, home, site, first, last in births:
+            if last == layer:
+                for spot, qubit in list(qubit_at.items()):
+                    if qubit.role == role and qubit.index == index:
+                        qubit_at[spot] = Qubit(ROUTING, -1, spot)
         layers.append(gates)
 
     for checks, role in ((code.HX, CHECK_X), (code.HZ, CHECK_Z)):
@@ -320,7 +440,42 @@ def dormant(layer: int, window: tuple[int, int]) -> bool:
     return layer < first or layer > last
 
 
-def walk_schedule(code, word: str, rounds: int):
+def check_births(word: str, reborn, data_sites, rounds: int):
+    """옮긴 check들의 라운드별 탄생 기록 ``(role, index, home, site, first, last)``.
+
+    ``prune_routing``이 배치에서 빼고 탄생으로 돌린 check들이다. 창은 그 라운드가
+    시작될 때의 data 자리에 대고 센다 -- 홀수 라운드에는 data가 이미 ``-S_w``만큼
+    밀려 있으므로 그만큼 보정한다.
+    """
+    steps = parse_directional_word(word)
+    backward = [(-step_x, -step_y) for step_x, step_y in reversed(steps)]
+    end = (sum(step_x for step_x, _ in steps), sum(step_y for _, step_y in steps))
+    per_round = []
+    for round_index in range(rounds):
+        these = steps if round_index % 2 == 0 else backward
+        crossings = walk_crossings(these)
+        trajectory = [(0, 0)]
+        for (step_x, step_y) in these:
+            trajectory.append((trajectory[-1][0] + step_x,
+                               trajectory[-1][1] + step_y))
+        births = []
+        for role, index, start in reborn:
+            base = start if round_index % 2 == 0 else (start[0] + end[0],
+                                                       start[1] + end[1])
+            probe = base if round_index % 2 == 0 else (base[0] + end[0],
+                                                       base[1] + end[1])
+            met = [layer for layer, (cross_x, cross_y) in enumerate(crossings)
+                   if (probe[0] + cross_x, probe[1] + cross_y) in data_sites]
+            if not met:
+                continue
+            births.append((role, index, start,
+                           (base[0] + trajectory[met[0]][0],
+                            base[1] + trajectory[met[0]][1]), met[0], met[-1]))
+        per_round.append(births)
+    return per_round
+
+
+def walk_schedule(code, word: str, rounds: int, layout=None, reborn=()):
     """
     rounds 번의 라운드를 미리 돌려, 언제 어디서 무엇을 할지 확정한다.
 
@@ -340,22 +495,30 @@ def walk_schedule(code, word: str, rounds: int):
     steps = parse_directional_word(word)
     backward = [(-step_x, -step_y) for step_x, step_y in reversed(steps)]
 
-    layout = walk_layout(code, word)
+    layout = dict(layout) if layout else walk_layout(code, word)
     initial = dict(layout)
     position = {(qubit.role, qubit.index): site
                 for site, qubit in layout.items()
                 if qubit.role in (CHECK_X, CHECK_Z)}
 
+    data_sites = {site for site, qubit in initial.items() if qubit.role == DATA}
+    per_round = check_births(word, reborn, data_sites, rounds)
+
     schedule = []
     for round_index in range(rounds):
+        births = per_round[round_index]
         layers, windows = walk_round(
-            code, layout, steps if round_index % 2 == 0 else backward)
+            code, layout, steps if round_index % 2 == 0 else backward, births,
+            phase=round_index * len(steps))
         moments = [([], [], []) for _ in range(len(layers) + 2)]
         for layer, gates in enumerate(layers):
+            for role, index, _, site, first, _ in births:
+                if first == layer:        # 태어난 자리에서 reset이 걸린다
+                    position[(role, index)] = site
             # 자는 check의 SWAP은 내지 않는다. 그래야 그 자리가 이 moment에 비어서
             # reset과 측정이 gate와 나란히 들어간다.
             asleep = {position[key] for key, window in windows.items()
-                      if dormant(layer, window)}
+                      if key in position and dormant(layer, window)}
             moments[layer + 1][1].extend(
                 gate for gate in gates
                 if not (gate[0] == "SWAP"
@@ -368,11 +531,9 @@ def walk_schedule(code, word: str, rounds: int):
             for _, site_a, site_b in gates:
                 partner[site_a] = site_b
                 partner[site_b] = site_a
-            for key, site in position.items():
-                if site not in partner:
-                    raise ValueError(f"{key} at {site} has no gate in layer "
-                                     f"{layer}; a check must move every layer")
-            position = {key: partner[site] for key, site in position.items()}
+            # 일이 끝난 check는 gate가 없다. 그런 것은 제자리에 둔다.
+            position = {key: partner.get(site, site)
+                        for key, site in position.items()}
 
             for key, (_, last) in windows.items():
                 if last == layer:
@@ -387,7 +548,8 @@ def walk_schedule(code, word: str, rounds: int):
     return schedule, initial, final_data
 
 
-def walk_memory_z_base(code, word: str, rounds: int) -> stim.Circuit:
+def walk_memory_z_base(code, word: str, rounds: int,
+                       layout=None, reborn=()) -> stim.Circuit:
     """walk 스케줄로 짓는 잡음 없는 memory-Z 회로.
 
     ``circuit.py``의 ``memory_z_base``와 계약이 같다: moment를 TICK으로 갈라
@@ -402,7 +564,8 @@ def walk_memory_z_base(code, word: str, rounds: int) -> stim.Circuit:
     gate에 한 번도 나오지 않는 routing은 회로에서 뺀다. ``|0>``인 채로 아무와도 닿지
     않아 detector에 영향이 없고, 넣으면 qubit 수만 부푼다.
     """
-    schedule, initial, final_data = walk_schedule(code, word, rounds)
+    schedule, initial, final_data = walk_schedule(code, word, rounds,
+                                                  layout, reborn)
     _, LZ = code.logicals()
 
     used = {site for round_layers in schedule

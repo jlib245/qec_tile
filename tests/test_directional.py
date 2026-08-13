@@ -1,4 +1,4 @@
-"""Directional tile codes — word parsing, walk geometry, code assembly."""
+"""Directional tile code — word 파싱, walk 기하, 코드 조립."""
 import pytest
 
 from qec_tile.directional import (PAPER_CODES, build_directional_code,
@@ -8,13 +8,13 @@ from qec_tile.directional import (PAPER_CODES, build_directional_code,
 from qec_tile.distance import distance_upper_bound
 from qec_tile.gf2 import rank2
 
-# Derived, never listed by hand: adding a code to PAPER_CODES has to pull it
-# into the word-level checks too, or it silently escapes them.
+# 손으로 적지 않고 파생시킨다: PAPER_CODES에 코드를 추가하면 word 수준 검사에도
+# 끌려들어와야 하고, 그러지 않으면 조용히 빠져나간다.
 PAPER_WORDS = sorted({word for word, *_ in PAPER_CODES})
 
 
 def test_single_letters_map_to_unit_steps():
-    """Compass convention: N is +y and E is +x on the hardware grid."""
+    """compass 관례: 하드웨어 격자에서 N은 +y, E는 +x."""
     assert parse_directional_word("N") == [(0, 1)]
     assert parse_directional_word("E") == [(1, 0)]
     assert parse_directional_word("S") == [(0, -1)]
@@ -27,12 +27,12 @@ def test_digits_repeat_the_step():
 
 
 def test_repeat_counts_are_read_greedily():
-    """``N12`` is twelve steps, not one step followed by a stray ``2``."""
+    """``N12``는 열두 걸음이고, 한 걸음 뒤에 엉뚱한 ``2``가 붙은 게 아니다."""
     assert parse_directional_word("N12") == [(0, 1)] * 12
 
 
 def test_paper_words_have_the_printed_length():
-    """Table 2 prints the word's letter count as its weight w."""
+    """Table 2는 word의 글자 수를 weight w로 인쇄한다."""
     assert len(parse_directional_word("N2ESEN2")) == 7
     assert len(parse_directional_word("N2E2SE2N2")) == 9
     assert len(parse_directional_word("N2E2SESE2N2")) == 11
@@ -49,29 +49,29 @@ def test_repeat_of_one_is_allowed():
 
 @pytest.mark.parametrize("word", ["NX", "2N", "N0", "", "   "])
 def test_malformed_words_are_rejected(word):
-    """A typo must not silently parse into a shorter walk."""
+    """오타가 조용히 더 짧은 walk로 파싱되면 안 된다."""
     with pytest.raises(ValueError):
         parse_directional_word(word)
 
 
-# --- the walk -------------------------------------------------------------
+# --- walk -----------------------------------------------------------------
 
 @pytest.mark.parametrize("word", PAPER_WORDS)
 def test_paper_words_have_weight_w(word):
-    """One letter is one edge, so Table 2's weight column is the walk length."""
+    """한 글자가 한 edge이므로 Table 2의 weight 열이 곧 walk 길이다."""
     steps = parse_directional_word(word)
     assert len(walk_edges(steps)) == len(steps)
 
 
 def test_w7_word_walk():
-    """N2ESEN2 traced by hand on the code lattice, in walk order."""
+    """N2ESEN2를 코드 격자 위에서 손으로 따라간 것, walk 순서로."""
     assert walk_edges(parse_directional_word("N2ESEN2")) == [
         ("V", 0, 0), ("V", 0, 1), ("H", 0, 2), ("V", 1, 1), ("H", 1, 1),
         ("V", 2, 1), ("V", 2, 2)]
 
 
 def test_w11_word_walk():
-    """N2E2SESE2N2 — the word behind the paper's [[323,14,15]] code."""
+    """N2E2SESE2N2 — 논문의 [[323,14,15]] 코드 뒤에 있는 word."""
     assert walk_edges(parse_directional_word("N2E2SESE2N2")) == [
         ("V", 0, 0), ("V", 0, 1), ("H", 0, 2), ("H", 1, 2), ("V", 2, 1),
         ("H", 2, 1), ("V", 3, 0), ("H", 3, 0), ("H", 4, 0), ("V", 5, 0),
@@ -79,26 +79,26 @@ def test_w11_word_walk():
 
 
 def test_backward_steps_cross_the_edge_behind_the_vertex():
-    """Going W from (0,0) crosses H(-1,0); reading it as H(0,0) shifts the tile."""
+    """(0,0)에서 W로 가면 H(-1,0)을 건넌다. H(0,0)으로 읽으면 tile이 밀린다."""
     assert walk_edges(parse_directional_word("S")) == [("V", 0, -1)]
     assert walk_edges(parse_directional_word("W")) == [("H", -1, 0)]
 
 
 def test_a_step_and_its_reverse_cross_the_same_edge():
-    """N then S returns along the edge it came up, so the walk is not a string."""
+    """N 다음 S는 올라온 edge로 되돌아오므로, 그 walk는 string이 아니다."""
     assert walk_edges(parse_directional_word("NS")) == [("V", 0, 0), ("V", 0, 0)]
 
 
-# --- the tile -------------------------------------------------------------
+# --- tile -----------------------------------------------------------------
 
 def test_w7_tile():
-    """The w=7 walk, split by orientation and boxed."""
+    """w=7 walk를 방향별로 갈라 box에 담은 것."""
     assert tile_from_word("N2ESEN2") == (
         [(0, 2), (1, 1)], [(0, 0), (0, 1), (1, 1), (2, 1), (2, 2)], 3)
 
 
 def test_w11_tile():
-    """The word behind the paper's [[323,14,15]] code."""
+    """논문의 [[323,14,15]] 코드 뒤에 있는 word."""
     assert tile_from_word("N2E2SESE2N2") == (
         [(0, 2), (1, 2), (2, 1), (3, 0), (4, 0)],
         [(0, 0), (0, 1), (2, 1), (3, 0), (5, 0), (5, 1)], 6)
@@ -106,7 +106,7 @@ def test_w11_tile():
 
 @pytest.mark.parametrize("word", PAPER_WORDS)
 def test_offsets_are_normalised_to_the_origin(word):
-    """build_tile_code rejects anything outside [0,B), so the box must be hugged."""
+    """build_tile_code는 [0,B) 밖을 거부하므로 box에 딱 붙어야 한다."""
     x_h, x_v, _ = tile_from_word(word)
     offsets = x_h + x_v
     assert min(x for x, _ in offsets) == 0
@@ -114,13 +114,13 @@ def test_offsets_are_normalised_to_the_origin(word):
 
 
 def test_southward_word_is_shifted_into_the_box():
-    """A walk into negative y must be translated, not clipped."""
+    """음의 y로 가는 walk는 잘리지 말고 평행이동돼야 한다."""
     assert tile_from_word("S2ESES2") == (
         [(0, 3), (1, 2)], [(0, 3), (0, 4), (1, 2), (2, 0), (2, 1)], 5)
 
 
 def test_B_is_the_larger_span():
-    """S2ESES2 spans 3 in x but 5 in y; a square box has to take the larger."""
+    """S2ESES2는 x로 3, y로 5를 걸친다. 정사각 box는 큰 쪽을 잡아야 한다."""
     _, _, B = tile_from_word("S2ESES2")
     assert B == 5
 
@@ -132,13 +132,13 @@ def test_tile_fits_the_box(word):
 
 
 def test_repeated_edge_is_rejected():
-    """NSN walks V(0,0) twice — not a string, and not a valid CXSWAP order."""
+    """NSN은 V(0,0)을 두 번 걷는다 — string이 아니고, 유효한 CXSWAP 순서도 아니다."""
     with pytest.raises(ValueError, match="twice"):
         tile_from_word("NSN")
 
 
 def test_explicit_B_is_honoured():
-    """B is a free parameter: the paper never states it for its own codes."""
+    """B는 자유 파라미터다: 논문은 자기 코드에 대해 B를 밝히지 않는다."""
     assert tile_from_word("N2ESEN2", B=4) == (
         [(0, 2), (1, 1)], [(0, 0), (0, 1), (1, 1), (2, 1), (2, 2)], 4)
 
@@ -148,10 +148,10 @@ def test_too_small_B_is_rejected():
         tile_from_word("N2ESEN2", B=1)
 
 
-# --- the parity condition -------------------------------------------------
+# --- parity 조건 ----------------------------------------------------------
 
 def test_fig5_word_displacement_vectors():
-    """Figure 5's own example, NESEN: three yellow pairs and four green.
+    """Figure 5 자신의 예시 NESEN: 노란 쌍 셋과 초록 넷.
 
     "Green vectors have even vertical displacement, while the different shades
     of yellow indicate pairs of vectors with odd vertical displacement."
@@ -164,8 +164,8 @@ def test_fig5_word_displacement_vectors():
 
 
 def test_odd_vertical_displacement_means_mixed_orientation():
-    """H sites sit at even hardware y and V sites at odd, so Δy parity is the
-    orientation test — the fact that makes the condition cheap to reason about."""
+    """H site는 하드웨어 y가 짝수, V site는 홀수에 앉으므로 Δy의 parity가 곧 방향
+    판정이다 — 이 조건을 값싸게 따질 수 있게 해주는 사실."""
     for word in PAPER_WORDS:
         edges = walk_edges(parse_directional_word(word))
         for i, first in enumerate(edges):
@@ -176,9 +176,9 @@ def test_odd_vertical_displacement_means_mixed_orientation():
 
 
 def test_a_word_violating_the_condition_is_detected():
-    """Without this the checker could just return True and every test above passes.
+    """이게 없으면 checker가 그냥 True를 돌려줘도 위의 모든 테스트가 통과한다.
 
-    NE has one displacement vector, (1,1): odd vertical, multiplicity one.
+    NE의 변위 벡터는 (1,1) 하나다: 수직이 홀수이고 중복도는 1.
     """
     assert not satisfies_parity_condition(
         walk_edges(parse_directional_word("NE")))
@@ -186,36 +186,36 @@ def test_a_word_violating_the_condition_is_detected():
 
 @pytest.mark.parametrize("word", PAPER_WORDS)
 def test_tile_weight_is_the_word_length(word):
-    """The tile itself, before any assembly or pruning: 7, 9, 11, 13."""
+    """tile 자체, 조립이나 pruning 전: 7, 9, 11, 13."""
     x_h, x_v, _ = tile_from_word(word)
     assert len(x_h) + len(x_v) == len(parse_directional_word(word))
 
 
-# --- the paper's codes ------------------------------------------------------
+# --- 논문의 코드들 ----------------------------------------------------------
 #
-# Everything below runs on the codes we actually build, benchmark and decode,
-# so adding a row to PAPER_CODES subjects it to the whole contract at once.
+# 아래 전부는 우리가 실제로 짓고, 벤치마크하고, 디코딩하는 코드 위에서 돌아간다.
+# 그래서 PAPER_CODES에 한 행을 추가하면 그 계약 전체가 한꺼번에 걸린다.
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_commute(word, M, N, n, k, d):
-    """Definition 1's mutual condition is (T2), so the walk cannot break it."""
+    """Definition 1의 mutual condition은 (T2)이므로 walk가 그것을 깰 수 없다."""
     code = build_directional_code(word, M, N)
     assert not ((code.HX @ code.HZ.T) % 2).any()
 
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_have_a_deterministic_schedule(word, M, N, n, k, d):
-    """Definition 1's parity condition, on the codes that will carry a circuit.
+    """Definition 1의 parity 조건. 회로를 지게 될 코드들에 대해.
 
-    It depends on the word alone, so this repeats a word across its layouts on
-    purpose: what must never happen is a code reaching the decoder without it.
+    word에만 의존하므로 한 word를 여러 배치에 걸쳐 일부러 반복한다: 절대 일어나면 안
+    되는 일은 이것 없이 코드가 디코더까지 가는 것이다.
     """
     assert satisfies_parity_condition(walk_edges(parse_directional_word(word)))
 
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_have_no_overweight_checks(word, M, N, n, k, d):
-    """Truncation and pruning only ever remove qubits from a stamped tile."""
+    """절단과 pruning은 찍어낸 tile에서 qubit을 덜어낼 뿐이다."""
     weight = len(parse_directional_word(word))
     code = build_directional_code(word, M, N)
     assert code.HX.sum(1).max() <= weight
@@ -224,7 +224,7 @@ def test_paper_codes_have_no_overweight_checks(word, M, N, n, k, d):
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_have_no_empty_checks(word, M, N, n, k, d):
-    """A tile stamped entirely off the lattice must leave no check behind."""
+    """tile이 통째로 격자 밖에 찍히면 check가 남아서는 안 된다."""
     code = build_directional_code(word, M, N)
     assert code.HX.shape[0] == len(code.x_anchors)
     assert code.HZ.shape[0] == len(code.z_anchors)
@@ -234,11 +234,11 @@ def test_paper_codes_have_no_empty_checks(word, M, N, n, k, d):
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_reach_the_pruning_fixpoint(word, M, N, n, k, d):
-    """Every surviving qubit is seen by both check types after one pass.
+    """한 번의 패스 뒤에 살아남은 모든 qubit이 두 check 타입에 보인다.
 
-    Worth more here than for the paper's original tiles, where pruning removes
-    nothing and the property holds for free — a directional tile does not fill
-    its box, so the pass actually runs.
+    논문의 원래 tile보다 여기서 더 값지다. 거기서는 pruning이 아무것도 지우지 않아 이
+    성질이 공짜로 성립하지만, directional tile은 box를 다 채우지 않아 패스가 실제로
+    돈다.
     """
     code = build_directional_code(word, M, N)
     assert (code.HX.sum(0) > 0).all()
@@ -247,10 +247,9 @@ def test_paper_codes_reach_the_pruning_fixpoint(word, M, N, n, k, d):
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_have_independent_checks(word, M, N, n, k, d):
-    """Tile codes have no check dependencies; pruning here must not create any.
+    """tile code에는 check 의존성이 없다. 여기의 pruning이 그것을 만들어내면 안 된다.
 
-    If it holds then k = n - mx - mz, which is what makes k a property of the
-    word rather than of the layout.
+    성립하면 k = n - mx - mz이고, 이것이 k를 배치가 아니라 word의 성질로 만든다.
     """
     code = build_directional_code(word, M, N)
     assert (rank2(code.HX), rank2(code.HZ)) == (code.HX.shape[0],
@@ -259,11 +258,10 @@ def test_paper_codes_have_independent_checks(word, M, N, n, k, d):
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_are_invariant_under_larger_B(word, M, N, n, k, d):
-    """Why the paper never states B: a roomier box prunes back to the same code.
+    """논문이 B를 밝히지 않는 이유: box를 넉넉히 잡아도 pruning이 같은 코드로 되돌린다.
 
-    Raising B shifts the Z-tile by (1,1) — a relabelling of the Z anchors —
-    and widens the qubit grid, but the tile never reaches the extra qubits so
-    pruning drops them again.
+    B를 올리면 Z-tile이 (1,1)만큼 밀리고(Z anchor의 재labelling) qubit 격자가
+    넓어지는데, tile이 늘어난 qubit에 닿지 않으므로 pruning이 다시 버린다.
     """
     _, _, minimal = tile_from_word(word)
     codes = [build_directional_code(word, M, N, B)
@@ -273,11 +271,10 @@ def test_paper_codes_are_invariant_under_larger_B(word, M, N, n, k, d):
 
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_have_the_printed_n_and_k(word, M, N, n, k, d):
-    """Every row of Table 2, from the word alone.
+    """Table 2의 모든 행을, word 하나만으로.
 
-    This is the check that fixes the whole geometry: the walk convention, the
-    anchor layout and the pruning pass all have to be right at once for seven
-    independent (n,k) pairs to land.
+    기하 전체를 고정하는 검사다: walk 관례, anchor 배치, pruning 패스가 동시에 다
+    맞아야 독립적인 (n,k) 짝 일곱 개가 들어맞는다.
     """
     code = build_directional_code(word, M, N)
     assert (code.n, code.k) == (n, k)
@@ -286,14 +283,13 @@ def test_paper_codes_have_the_printed_n_and_k(word, M, N, n, k, d):
 @pytest.mark.slow
 @pytest.mark.parametrize("word,M,N,n,k,d", PAPER_CODES)
 def test_paper_codes_reach_the_printed_distance(word, M, N, n, k, d):
-    """The distances too — an upper bound, not a proof.
+    """거리도 — 증명이 아니라 상한이다.
 
-    ``distance_upper_bound`` reports the weight of a logical operator it
-    actually found, so it can never sit below d.  Landing exactly on the
-    paper's value means such an operator exists and nothing lighter turned up.
-    Proving the bound tight needs ``distance_ilp``, which does not finish at
-    n = 351.  This is what chose the layouts: the discarded candidates shared
-    (n,k) but came back at d = 3, 2 and 6.
+    ``distance_upper_bound``는 자기가 실제로 찾아낸 logical 연산자의 weight를
+    보고하므로 d 아래에 앉을 수 없다. 논문 값에 정확히 닿는다는 것은 그런 연산자가
+    존재하고 더 가벼운 것은 나오지 않았다는 뜻이다. 상한이 딱 맞음을 증명하려면
+    ``distance_ilp``가 필요한데, n = 351에서는 끝나지 않는다. 배치를 고른 근거가
+    이것이다: 버려진 후보들은 (n,k)는 같았지만 d = 3, 2, 6으로 돌아왔다.
     """
     code = build_directional_code(word, M, N)
     assert distance_upper_bound(code, trials=400, seed=0) == d

@@ -1,4 +1,4 @@
-"""Allocation settings from .env — no defaults, loud when missing."""
+""".env에서 읽는 자원 할당 설정 — 기본값 없이, 없으면 시끄럽게."""
 import os
 
 import pytest

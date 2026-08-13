@@ -8,7 +8,8 @@ from qec_tile.directional import (DIRECTIONS, build_directional_code,
                                   hardware_site, parse_directional_word,
                                   satisfies_parity_condition, walk_edges)
 from qec_tile.noise_model import NoiseModel
-from qec_tile.walk import (CHECK_X, CHECK_Z, DATA, ROUTING, Qubit, check_starts,
+from qec_tile.walk import (CHECK_X, CHECK_Z, DATA, FILLER, ROUTING, Qubit,
+                           check_starts,
                            flow_step, walk_crossings, walk_layout,
                            walk_memory_z_base, walk_round)
 
@@ -30,19 +31,8 @@ def lattice(step, xs=range(4), ys=range(4)) -> dict:
                 role = DATA
             qubit_at[(x, y)] = Qubit(role, len(qubit_at), (x, y))
     return {site: qubit for site, qubit in qubit_at.items()
-            if not qubit.walks
+            if qubit.role == DATA
             or (site[0] + step[0], site[1] + step[1]) in qubit_at}
-
-
-def test_only_even_sum_sites_walk():
-    """격자의 법칙: vertex ``(even, even)``와 face 중심 ``(odd, odd)``는 좌표합이
-    짝수라 걷고, edge 중점은 홀수라 밀린다. 나머지 전부가 이 한 줄에 얹힌다."""
-    assert Qubit(CHECK_X, 0, (0, 0)).walks
-    assert Qubit(CHECK_Z, 0, (1, 1)).walks
-    assert Qubit(ROUTING, 0, (2, 2)).walks
-    assert not Qubit(DATA, 0, (1, 0)).walks
-    assert not Qubit(DATA, 0, (0, 1)).walks
-    assert not Qubit(ROUTING, 0, (0, 1)).walks
 
 
 def test_x_check_crosses_the_edge_it_walks_over():
@@ -87,7 +77,7 @@ def test_check_swaps_through_a_routing_qubit_instead_of_entangling():
     무작위가 된다 -- 잡음이 없어도 detector가 울리는 실패 모드다.
     """
     qubit_at = lattice(DIRECTIONS["N"])
-    qubit_at[(0, 1)] = Qubit(ROUTING, 0, (0, 1))
+    qubit_at[(0, 1)] = Qubit(FILLER, 0, (0, 1))
     gates = flow_step(qubit_at, DIRECTIONS["N"])
     assert ("SWAP", (0, 0), (0, 1)) in gates
 
@@ -131,19 +121,16 @@ def test_a_step_and_its_reverse_restore_the_layout():
     assert qubit_at == before
 
 
-def test_routing_passes_routing_without_a_gate_but_still_moves():
-    """Algorithm 1의 16-19행: ``R``끼리는 gate를 내지 않는다. 둘 다 ``|0>``이라
-    교환이 물리적으로 항등이고, gate를 내면 잡음 자리만 공짜로 는다.
+def test_a_shuttle_passing_a_filler_emits_no_gate():
+    """Algorithm 1의 16-19행: ``R``은 ``D``를 만날 때만 gate를 낸다.
 
-    그래도 **자리는 바꿔야 한다**. 안 바꾸면 그 walker만 한 층 뒤처져 lockstep이
-    깨지고, 다음 층에 check를 정면으로 들이받는다 -- ``NESEN`` 4x4에서 ``(-4,4)``의
-    routing이 한 층 쉬었다가 ``(-3,4)``로 걸어온 Z check와 부딪혔다.
+    둘 다 ``|0>``이라 교환이 물리적으로 항등이기 때문이다. 그래도 자리는 바꾼다 --
+    셔틀이 한 층 쉬면 그만 뒤처져 다음 층에 남의 자리를 밟는다.
     """
-    qubit_at = {(0, 0): Qubit(ROUTING, 0, (0, 0)),   # 짝수합 -> 걷는다
-                (0, 1): Qubit(ROUTING, 1, (0, 1))}   # 홀수합 -> 밀린다
+    qubit_at = {(0, 0): Qubit(ROUTING, 0, (0, 0)),    # 셔틀
+                (0, 1): Qubit(FILLER, 1, (0, 1))}     # 디딤돌
     assert flow_step(qubit_at, DIRECTIONS["N"]) == []
-    assert qubit_at[(0, 1)].index == 0               # 걷는 쪽이 앞으로
-    assert qubit_at[(0, 0)].index == 1               # 밀리는 쪽이 뒤로
+    assert qubit_at[(0, 1)].role == ROUTING           # 자리는 바뀐다
 
 
 def test_a_check_that_cannot_step_is_rejected():
@@ -153,12 +140,12 @@ def test_a_check_that_cannot_step_is_rejected():
         flow_step(qubit_at, DIRECTIONS["N"])
 
 
-def test_a_routing_qubit_that_cannot_step_just_waits():
-    """바깥 테두리의 routing은 갈 자리가 없어도 그냥 선다.
+def test_a_shuttle_with_nowhere_to_go_just_waits():
+    """셔틀은 갈 자리가 없으면 그냥 선다 -- Algorithm 1이 ``end if``로 비워둔 분기다.
 
-    Algorithm 1이 ``end if``로 비워둔 분기이고, 유한한 격자에서는 이걸 허용하지
-    않으면 배치가 아예 존재할 수 없다 -- 경계에서 walker를 지우면 그 빈자리 때문에
-    안쪽 walker도 지워야 하고, 그 침식이 격자를 통째로 먹는다.
+    ``walk_layout``이 만든 배치에서는 일어나지 않는다. 셔틀의 궤적을 통째로 깔아주기
+    때문이고, 논문 코드 네 개로 두 라운드를 돌려 이 분기가 한 번도 안 타는 것을
+    확인했다. check는 반대로 못 가면 오류다 -- stabilizer를 덜 재게 되므로.
     """
     qubit_at = {(0, 0): Qubit(ROUTING, 0, (0, 0))}
     assert flow_step(qubit_at, DIRECTIONS["N"]) == []
@@ -298,7 +285,7 @@ def test_checks_sit_at_their_starts():
 def test_roles_match_the_sublattice():
     """짝수합 자리에 data가 없고 홀수합 자리에 check가 없다.
 
-    ``walks``가 이 parity에 얹혀 있으므로, 어긋나면 흐름 자체가 성립하지 않는다.
+    셔틀과 디딤돌을 가르는 것이 이 parity라, 어긋나면 흐름이 성립하지 않는다.
     """
     _, qubit_at = small_layout()
     for site, qubit in qubit_at.items():
@@ -321,8 +308,8 @@ def test_a_full_round_runs_and_no_check_ever_stalls():
     qubit을 먹는데, 끝난 자리가 정확히 ``출발점 + S_w``면 한 번도 안 멈춘 것이다."""
     code, qubit_at = small_layout()
     steps = parse_directional_word("NESEN")
-    for step in steps:
-        flow_step(qubit_at, step)
+    for layer, step in enumerate(steps):
+        flow_step(qubit_at, step, layer)
     end_x = sum(step_x for step_x, _ in steps)
     end_y = sum(step_y for _, step_y in steps)
     checks = [(site, qubit) for site, qubit in qubit_at.items()
@@ -330,25 +317,6 @@ def test_a_full_round_runs_and_no_check_ever_stalls():
     assert len(checks) == code.HX.shape[0] + code.HZ.shape[0]
     for site, qubit in checks:
         assert site == (qubit.home[0] + end_x, qubit.home[1] + end_y)
-
-
-def test_no_walking_qubit_ever_leaves_the_layout():
-    """걷는 qubit은 전부 궤적이 배치 안에 들어온다.
-
-    벗어나는 테두리 routing은 걷다 마는 게 아니라 아예 세워둔다. 걷다 말면 그
-    walker만 phase가 어긋나 다음 층에 뒤따르던 walker와 같은 자리를 두고 겹친다 --
-    ``NESEN`` 4x4의 모서리 ``(-8,17)``에서 실제로 그렇게 터졌다.
-    """
-    _, qubit_at = small_layout()
-    position = (0, 0)
-    trajectory = []
-    for (step_x, step_y) in parse_directional_word("NESEN"):
-        position = (position[0] + step_x, position[1] + step_y)
-        trajectory.append(position)
-    for site, qubit in qubit_at.items():
-        if qubit.walks:
-            assert all((site[0] + offset_x, site[1] + offset_y) in qubit_at
-                       for offset_x, offset_y in trajectory)
 
 
 def test_every_data_qubit_has_someone_to_push_it():
@@ -449,13 +417,21 @@ def test_the_inverse_word_restores_the_layout():
     """"Consecutive rounds are alternated between the word D and the inverse word,
     so that the physical layout is restored without introducing long-range
     operations." 역 word는 순서를 뒤집고 방향을 뒤집은 것이다."""
+    def fingerprint(layout):                     # routing끼리는 구별되지 않는다
+        return {site: (DATA if qubit.role == DATA else
+                       qubit.role if qubit.role in (CHECK_X, CHECK_Z) else "zero",
+                       qubit.index if qubit.role in (CHECK_X, CHECK_Z, DATA)
+                       else None)
+                for site, qubit in layout.items()}
+
     code, qubit_at = figure4_layout()
-    before = dict(qubit_at)
+    before = fingerprint(qubit_at)
     steps = parse_directional_word("NESEN")
     walk_round(code, qubit_at, steps)
-    assert qubit_at != before                    # 한 라운드 뒤에는 옮겨져 있고
-    walk_round(code, qubit_at, [(-x, -y) for x, y in reversed(steps)])
-    assert qubit_at == before                    # 역 word가 되돌린다
+    assert fingerprint(qubit_at) != before       # 한 라운드 뒤에는 옮겨져 있고
+    walk_round(code, qubit_at, [(-x, -y) for x, y in reversed(steps)],
+               phase=len(steps))
+    assert fingerprint(qubit_at) == before       # 역 word가 되돌린다
 
 
 def test_a_check_carrying_the_wrong_row_is_caught():
