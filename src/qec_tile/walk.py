@@ -417,16 +417,35 @@ def walk_memory_z_base(code, word: str, rounds: int) -> stim.Circuit:
 
     circuit = stim.Circuit()
     # 좌표는 하드웨어 격자의 절반이라, data가 (x+0.5, y)에 오는 기존 그림 관례와 맞는다.
+    # y를 뒤집어 넣는다: stim의 그림은 y가 클수록 화면 아래라, 그대로 두면 N(북)이
+    # 아래로 그려지고 한 셀 안에서 Z check가 X check의 오른쪽 아래에 놓인다.
     for site, index in sorted(index_of.items(), key=lambda pair: pair[1]):
-        circuit.append("QUBIT_COORDS", [index], (site[0] / 2, site[1] / 2))
+        circuit.append("QUBIT_COORDS", [index], (site[0] / 2, -site[1] / 2))
+    # routing은 맨 앞이 아니라 첫 gate 직전 moment에 켠다. 그 자리에 gate가 처음
+    # 걸리는 moment가 k라면 그전까지 아무것도 안 닿았으므로 처음의 |0>이 그대로 있고,
+    # k-1에 reset해도 지우는 것이 없다. gate가 있는 moment는 1 이상이라 k-1은 같은
+    # 라운드 안이다. 일찍 켤수록 그 |0>이 오류를 주울 구간만 길어진다.
+    first_gate: dict = {}
+    for round_index, moments in enumerate(schedule):
+        for moment, (_, gates, _) in enumerate(moments):
+            for _, site_a, site_b in gates:
+                first_gate.setdefault(site_a, (round_index, moment))
+                first_gate.setdefault(site_b, (round_index, moment))
+    wake: dict = defaultdict(list)
+    for site, (round_index, moment) in first_gate.items():
+        if initial[site].role == ROUTING:
+            wake[(round_index, moment - 1)].append(index_of[site])
+
     total = 0                                  # 지금까지의 측정 수
     record: dict = {}                          # (라운드, check) -> 몇 번째 측정
     for round_index, moments in enumerate(schedule):
         for moment, (reset, gates, measure) in enumerate(moments):
-            if round_index == 0 and moment == 0:   # data와 routing은 한 번만
+            if round_index == 0 and moment == 0:   # data는 |0>에서 시작한다
                 circuit.append("R", sorted(
                     index_of[site] for site, qubit in initial.items()
-                    if site in index_of and qubit.role in (DATA, ROUTING)))
+                    if site in index_of and qubit.role == DATA))
+            if wake[(round_index, moment)]:
+                circuit.append("R", sorted(wake[(round_index, moment)]))
             for role, instruction in ((CHECK_X, "RX"), (CHECK_Z, "R")):
                 targets = sorted(index_of[site] for key, site in reset
                                  if key[0] == role)
@@ -462,7 +481,7 @@ def walk_memory_z_base(code, word: str, rounds: int) -> stim.Circuit:
 
     # data의 마지막 transversal Z readout이 각 Z check를 재구성한다. 라운드 수가
     # 홀수면 data가 제자리가 아니므로, 그 시점에 그 열을 들고 있는 qubit을 읽는다.
-    circuit.append("M", [index_of[final_data[col]] for col in range(code.n)])
+    circuit.append("MR", [index_of[final_data[col]] for col in range(code.n)])
     data_record = {}
     for col in range(code.n):
         data_record[col] = total

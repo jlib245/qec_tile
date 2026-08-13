@@ -518,6 +518,35 @@ def test_the_round_is_w_plus_two_moments_deep():
     assert ticks == 5 + 2
 
 
+def test_nothing_is_reset_long_before_it_is_used():
+    """"qubits whose first interaction occurs only in a later layer are reset only
+    immediately before use."
+
+    data를 빼면(그건 실험의 초기 상태라 맨 앞이다) 어떤 qubit도 자기 첫 2q gate보다
+    한 moment 넘게 앞서 켜지지 않아야 한다. 일찍 켤수록 그 ``|0>``이 오류를 주울
+    구간만 길어진다.
+    """
+    _, circuit = figure4_circuit(rounds=2)
+    first_reset, first_gate, data, moment = {}, {}, [], 0
+    for instruction in circuit.flattened():
+        if instruction.name == "TICK":
+            moment += 1
+            continue
+        targets = [target.value for target in instruction.targets_copy()]
+        if instruction.name in ("R", "RX"):
+            for qubit in targets:
+                first_reset.setdefault(qubit, moment)
+        elif instruction.name in ("CXSWAP", "SWAP"):
+            for qubit in targets:
+                first_gate.setdefault(qubit, moment)
+        elif instruction.name == "MR":
+            data = targets                     # 마지막 MR이 data readout이다
+    for qubit, when in first_reset.items():
+        if qubit in data or qubit not in first_gate:
+            continue
+        assert first_gate[qubit] - when <= 1
+
+
 def test_the_detectors_are_deterministic():
     """무잡음 회로의 detector가 결정적이지 않으면 stim이 DEM을 못 만들고 터진다."""
     code, circuit = figure4_circuit(rounds=3)
