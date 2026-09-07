@@ -13,6 +13,10 @@
                잡음은 없다
     si1000     SI1000 (Gidney 2021) 아래의 memory-Z: 초전도 기반으로 2q gate p,
                측정 5p, idle p/10, 측정-idle 2p
+    uniform    directional 논문 Table 7의 균일 잡음: gate, 측정, reset, idle 전부 p
+
+directional 모드는 --routing으로 배치를 고른다: plain은 walk_layout 그대로,
+optimised는 optimise_routing이 줄인 배치 (파일명 stem에 _opt가 붙는다).
 
 --meas-error나 --rounds를 덮어쓰면 기본 파일명은 그대로인데 숫자가 달라진다. 그럴
 때는 --out을 명시적으로 넘긴다.
@@ -42,24 +46,40 @@ from qec_tile import config
 from qec_tile.sinter_sampling import collect
 from qec_tile.tile import paper_code
 from qec_tile.directional import build_directional_code
-from qec_tile.walk2 import walk_memory_z_base
+from qec_tile.walk2 import optimise_routing, walk_memory_z_base
 
 
 def iter_codes(args):
-    """훑을 크기마다 (label, code, rounds)를 yield한다.
+    """훑을 크기마다 (label, code, rounds, layout, shifts)를 yield한다.
 
     tile 모드는 --Ls를 걷고(label은 str(L)), directional 모드는 --sizes를 걷는다
     (label은 "MxN"). label을 문자열로 둔 것은 CSV의 'L' 열과 재개 키가 두 모드에서 한
-    가지 타입으로 남게 하기 위해서다.
+    가지 타입으로 남게 하기 위해서다. ``layout``/``shifts``는 directional의 줄인
+    배치이고, 아니면 ``(None, ())`` -- ``walk_memory_z_base``의 기본값이다.
     """
     if args.word:                                    # directional
         for M, N in args.sizes:
             code = build_directional_code(args.word, M, N)
-            yield f"{M}x{N}", code, (args.rounds or max(M, N))
+            layout, shifts = ((None, ()) if args.routing == "plain"
+                              else optimise_routing(code, args.word))
+            yield f"{M}x{N}", code, (args.rounds or max(M, N)), layout, shifts
     else:                                            # 원래 tile
         for L in args.Ls:
             code = paper_code(args.tile, L, L)
-            yield str(L), code, (args.rounds or L)
+            yield str(L), code, (args.rounds or L), None, ()
+
+
+def uniform_noise(p: float) -> NoiseModel:
+    """directional 논문 Table 7: 2q gate, 1q, 측정, reset, idle 전부 p.
+
+    ``measure_reset_idle``은 0으로 둔다 -- walk 회로는 측정/reset이 gate와 같은
+    moment에 들어가서 둘 다 켜면 그 moment의 idle qubit이 두 번 맞는다. ``idle``이
+    moment마다 안 쓰인 qubit에 한 번 건다 (gate 없이 R/M만 있는 라운드 양끝 moment는
+    빠진다).
+    """
+    return NoiseModel(idle=p, measure_reset_idle=0.0,
+                      noisy_gates={"CX": p, "CXSWAP": p, "SWAP": p, "R": p,
+                                   "RX": p, "M": p, "MR": p, "MRX": p})
 
 FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
           "meas_error", "seed", "shots", "fails", "rate", "sec"]
@@ -96,20 +116,22 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
     일찍 멈출 수 있다).
     """
     circuits, codes = {}, {}
-    for label, code, rounds in iter_codes(args):
+    for label, code, rounds, layout, shifts in iter_codes(args):
         codes[label] = (code, rounds)
         for p in args.ps:
             if (label, p) in done:
                 print(f"skip  L={label} p={p}")
                 continue
-            base = (walk_memory_z_base(code, args.word, rounds) if args.word
-                    else memory_z_base(code, rounds))
+            base = (walk_memory_z_base(code, args.word, rounds, layout, shifts)
+                    if args.word else memory_z_base(code, rounds))
             if args.noise == "circuit":        # 균일 p: 2q gate 이름이 회로마다 다르다
                 model = NoiseModel(
                     idle=0.0, measure_reset_idle=0.0,
                     noisy_gates={"CX": p, "CXSWAP": p, "SWAP": p, "R": p,
                                  "RX": p, "M": p, "MR": p, "MRX": p})
                 circuits[(label, p)] = model.noisy_circuit(base)
+            elif args.noise == "uniform":
+                circuits[(label, p)] = uniform_noise(p).noisy_circuit(base)
             else:                              # si1000
                 circuits[(label, p)] = NoiseModel.SI1000(p).noisy_circuit(base)
     if not circuits:
@@ -143,7 +165,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--decoder", required=True, choices=sorted(DECODERS))
     ap.add_argument("--noise", required=True,
-                    choices=["capacity", "pheno", "circuit", "si1000"])
+                    choices=["capacity", "pheno", "circuit", "si1000",
+                             "uniform"])
+    ap.add_argument("--routing", default="plain",
+                    choices=["plain", "optimised"],
+                    help="directional only: walk_layout as is, or the layout "
+                         "optimise_routing shrinks (_opt in the file name)")
     ap.add_argument("--tile", default="b3w6")
     ap.add_argument("--Ls", default="4,6,8,10", type=parse_ints)
     ap.add_argument("--word", default=None,
@@ -171,10 +198,13 @@ def main():
         ap.error("--word requires --sizes")
     if args.sizes and not args.word:
         ap.error("--sizes requires --word")
+    if args.routing != "plain" and not args.word:
+        ap.error("--routing applies to directional mode only")
     if args.noise != "pheno" and args.meas_error is not None:
         ap.error("--meas-error only applies to --noise pheno")
-    if args.workers is not None and args.noise not in ("circuit", "si1000"):
-        ap.error("--workers only applies to --noise circuit/si1000")
+    if args.workers is not None and args.noise not in ("circuit", "si1000",
+                                                       "uniform"):
+        ap.error("--workers only applies to --noise circuit/si1000/uniform")
     if args.workers == -1:                     # 맨 --workers: 할당량을 쓴다
         args.workers = config.workers()
     if args.workers is not None and args.workers <= 0:
@@ -189,6 +219,8 @@ def main():
 
     if args.out is None:
         stem = args.word if args.word else args.tile
+        if args.routing == "optimised":
+            stem += "_opt"
         args.out = (f"data/{stem}_{args.decoder}_{args.noise}"
                     f"_shots{args.shots}_seed{args.seed}.csv")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -203,7 +235,7 @@ def main():
         if args.workers is not None:
             parallel_sweep(args, writer, f, done)
             return
-        for label, code, rounds in iter_codes(args):
+        for label, code, rounds, layout, shifts in iter_codes(args):
             if args.noise == "capacity":
                 rounds = 1
             if args.noise == "pheno":
@@ -226,7 +258,8 @@ def main():
                                               args.decoder, seed=args.seed)
                 else:                          # 회로 잡음: p가 이미 박혀 있다
                     meas_error = ""
-                    base = (walk_memory_z_base(code, args.word, rounds)
+                    base = (walk_memory_z_base(code, args.word, rounds,
+                                               layout, shifts)
                             if args.word else memory_z_base(code, rounds))
                     if args.noise == "circuit":
                         circuit = NoiseModel(
@@ -234,6 +267,8 @@ def main():
                             noisy_gates={"CX": p, "CXSWAP": p, "SWAP": p,
                                          "R": p, "RX": p, "M": p, "MR": p,
                                          "MRX": p}).noisy_circuit(base)
+                    elif args.noise == "uniform":
+                        circuit = uniform_noise(p).noisy_circuit(base)
                     else:                      # si1000
                         circuit = NoiseModel.SI1000(p).noisy_circuit(base)
                     rate = circuit_failure_rate(circuit, args.shots,
