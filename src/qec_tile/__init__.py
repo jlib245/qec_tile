@@ -20,10 +20,10 @@ from .pheno import spacetime_channel, spacetime_matrices
 from .sinter_sampling import SINTER_DECODERS, collect
 from .tile import TILES, TileCode, build_tile_code, paper_code
 from .walk2 import (CHECK_X, CHECK_Z, DATA, Qubit, ROUTING, check_starts,
-                    dormant, flow_step, partial_sums, reverse_steps,
-                    route_windows, shorten_route_windows, trace_prune,
-                    walk_crossings, walk_layout, walk_memory_z_base,
-                    walk_round, walk_schedule)
+                    dormant, flow_step, optimise_routing, partial_sums,
+                    reverse_steps, route_window_shortening, route_windows,
+                    trace_pruning, walk_crossings, walk_layout,
+                    walk_memory_z_base, walk_round, walk_schedule)
 
 __all__ = ["add", "parity", "config", "cycles", "BpIteration", "bp",
            "bp_trace", "METHODS", "tanner_edges", "TILES", "TileCode",
@@ -37,7 +37,7 @@ __all__ = ["add", "parity", "config", "cycles", "BpIteration", "bp",
            "displacement_vectors", "parse_directional_word",
            "satisfies_parity_condition", "tile_from_word", "walk_edges",
            "CHECK_X", "CHECK_Z", "DATA", "ROUTING", "Qubit",
-           "check_starts", "route_windows", "dormant", "flow_step",
-           "partial_sums", "trace_prune", "shorten_route_windows",
-           "reverse_steps", "walk_crossings", "walk_layout",
+           "check_starts", "dormant", "flow_step", "optimise_routing",
+           "partial_sums", "reverse_steps", "route_window_shortening",
+           "route_windows", "trace_pruning", "walk_crossings", "walk_layout",
            "walk_memory_z_base", "walk_round", "walk_schedule"]

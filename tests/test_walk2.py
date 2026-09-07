@@ -6,9 +6,10 @@ from qec_tile.directional import (DIRECTIONS, build_directional_code,
                                   hardware_site, parse_directional_word,
                                   walk_edges)
 from qec_tile.noise_model import NoiseModel
-from qec_tile.walk2 import (CHECK_X, CHECK_Z, DATA, ROUTING, Qubit,
-                            births_for, check_starts, route_windows, flow_step,
-                            partial_sums, trace_prune, shorten_route_windows,
+from qec_tile.walk2 import (CHECK_X, CHECK_Z, DATA, ROUTING, ROUNDS_TESTED,
+                            Qubit, births_for, check_starts, route_windows,
+                            flow_step,
+                            partial_sums, trace_pruning, route_window_shortening,
                             reverse_steps, round_births, walk_crossings,
                             walk_layout, walk_memory_z_base, walk_round,
                             walk_schedule)
@@ -190,15 +191,22 @@ def test_every_letter_steps_the_walkers_once(letter):
     assert qubit_at[step].role == CHECK_X
 
 
-def test_a_check_with_nowhere_to_go_is_measured_there():
-    """갈 자리가 없다 = 격자 밖에서 잘렸다. check는 그 자리에서 읽히고 ``|0>``이 된다.
+def test_a_check_with_nowhere_to_go_waits_until_it_is_done():
+    """갈 자리가 없으면 check는 기다린다. support를 다 먹은 뒤라면 거기서 읽힌다.
 
-    오류로 처리하면 tile이 잘리는 경계 check가 있는 코드는 회로가 아예 안 지어진다.
-    측정을 안 하면 그 stabilizer 결과를 영영 못 읽는다.
+    Algorithm 1의 if/else if에는 else가 없다 -- 앞이 ``D``도 ``R``도 아니면 아무것도
+    안 한다. 창 중간에서 빈 자리를 만난 check를 측정해 버리면 논문 Figure 7의
+    배치(bottom X가 층 3에서 한 층 기다린다)가 거절된다. 다 먹은 check는 지금처럼
+    그 자리에서 읽혀 ``|0>``이 된다 -- 창 뒤쪽 절단이 이것이다.
     """
     check = Qubit(CHECK_X, 3, (0, 0))
     qubit_at = {(0, 0): check}
     gates, measured = flow_step(qubit_at, NORTH)
+    assert gates == []
+    assert measured == []
+    assert qubit_at[(0, 0)] == check              # 제자리에서 기다린다
+
+    gates, measured = flow_step(qubit_at, NORTH, done={(CHECK_X, 3)})
     assert gates == []
     assert measured == [(check, (0, 0))]
     assert qubit_at[(0, 0)].role == ROUTING      # MRX 뒤에는 |0>이다
@@ -247,13 +255,21 @@ def test_routing_facing_a_check_does_nothing():
     assert qubit_at[(0, 0)] == routing        # R은 제자리
 
 
-def test_two_checks_meeting_is_rejected():
-    """check가 check를 미는 배치는 출발점 기하가 깨진 것이다."""
-    qubit_at = {(0, 0): Qubit(CHECK_X, 0, (0, 0)),
+def test_a_check_behind_another_check_waits():
+    """check가 check를 마주치면 기다린다. 앞 check만 걷고 뒤는 제자리다.
+
+    에러로 처리하면 논문 Figure 7의 배치(bottom X가 층 5에서 앞 check 뒤에서 한 층
+    기다린 뒤 층 6에 마지막 data를 만난다)가 거절된다. Algorithm 1에는 이 경우의
+    분기가 없다.
+    """
+    behind = Qubit(CHECK_X, 0, (0, 0))
+    qubit_at = {(0, 0): behind,
                 (0, 1): Qubit(CHECK_Z, 0, (0, 1)),
                 (0, 2): Qubit(DATA, 0, (0, 2))}
-    with pytest.raises(ValueError, match="two checks"):
-        flow_step(qubit_at, NORTH)
+    gates, measured = flow_step(qubit_at, NORTH)
+    assert gates == [("CXSWAP", (0, 2), (0, 1))]
+    assert measured == []
+    assert qubit_at[(0, 0)] == behind
 
 
 def test_one_site_cannot_take_two_gates():
@@ -557,7 +573,7 @@ def test_pruning_keeps_the_stabilisers(word, L1, L2):
     the measured stabiliser supports, detectors and logical observables".
     """
     code = build_directional_code(word, L1, L2)
-    layout, shifts = shorten_route_windows(code, word)
+    layout, shifts = route_window_shortening(code, word)
     walk_round(code, layout, parse_directional_word(word),
                births_for(code, word, 0, layout, shifts))
 
@@ -574,7 +590,7 @@ def test_pruning_removes_routing():
         code = build_directional_code(word, L1, L2)
         plain = sum(1 for qubit in walk_layout(code, word).values()
                     if qubit.role == ROUTING)
-        layout, _ = shorten_route_windows(code, word)
+        layout, _ = route_window_shortening(code, word)
         pruned = sum(1 for qubit in layout.values() if qubit.role == ROUTING)
         assert (plain, pruned) == (before, after)
 
@@ -588,7 +604,7 @@ def test_a_birth_seat_is_left_empty(word, L1, L2):
     앞에 data가 있을 때 걸어가 버려 흐름에 없던 walker가 하나 늘어난다.
     """
     code = build_directional_code(word, L1, L2)
-    layout, shifts = shorten_route_windows(code, word)
+    layout, shifts = route_window_shortening(code, word)
     for _, _, _, seat, _, _ in round_births(code, word, 0, shifts):
         assert seat not in layout
 
@@ -601,7 +617,7 @@ def test_no_check_moves_past_its_window():
     전부 옮겨진다 -- 단수 조건 대신 검증으로 판단하기 때문이다.
     """
     code = build_directional_code("N2ESEN2", 4, 4)
-    layout, shifts = shorten_route_windows(code, "N2ESEN2")
+    layout, shifts = route_window_shortening(code, "N2ESEN2")
     windows = route_windows(code, "N2ESEN2")
     late = {key for key, (first, _) in windows.items() if first > 0}
     assert len(late) == 16
@@ -622,7 +638,7 @@ def two_rounds(code, word, layout, shifts=()):
 
 def fully_pruned(code, word):
     """구성적 절단 위에 후보 이동 탐색까지 -- 최종 배치."""
-    return trace_prune(code, word, *shorten_route_windows(code, word))
+    return trace_pruning(code, word, *route_window_shortening(code, word))
 
 
 def test_generating_and_testing_removes_more():
@@ -640,7 +656,7 @@ def test_generating_and_testing_removes_more():
             (("NESEN", 2, 2), 18, 14), (("NESEN", 4, 4), 30, 24),
             (("N2ESEN2", 4, 4), 53, 47)):
         code = build_directional_code(word, L1, L2)
-        layout, _ = shorten_route_windows(code, word)
+        layout, _ = route_window_shortening(code, word)
         assert sum(1 for q in layout.values() if q.role == ROUTING) == before
         tested, _ = fully_pruned(code, word)
         assert sum(1 for q in tested.values() if q.role == ROUTING) == after
@@ -655,6 +671,46 @@ def test_the_tested_layout_still_measures_the_stabilisers(word, L1, L2):
     """
     code = build_directional_code(word, L1, L2)
     two_rounds(code, word, *fully_pruned(code, word))
+
+
+# 논문 Figure 7 (after)의 [[60,4,5]] 배치. arXiv HTML의 routing_optimisation.svg를
+# 파싱해 우리 좌표로 옮긴 것 -- routing 30 = Table 2의 146 - 60 - 56. check 자리는
+# ``route_window_shortening``의 shifts와 같고, 위쪽 data 여섯이 한 칸 S로 옮겨져 있다.
+PAPER_FIGURE_7_ROUTING = [
+    (-2, 8), (-1, -1), (-1, 0), (-1, 2), (-1, 4), (-1, 6), (-1, 8), (-1, 9),
+    (1, -2), (1, 7), (3, -2), (3, 7), (5, -2), (5, 7), (7, -2), (7, 7),
+    (8, -2), (8, -1), (8, 0), (8, 2), (8, 4), (8, 6), (8, 8), (9, -2), (9, 7),
+    (10, -1), (10, 0), (10, 2), (10, 4), (10, 6)]
+PAPER_FIGURE_7_DATA_SHIFTS = {(1, 10): (1, 9), (3, 10): (3, 9), (5, 10): (5, 9),
+                              (7, 10): (7, 9), (9, 10): (9, 9), (10, 9): (10, 8)}
+
+
+def test_the_paper_figure_7_layout_walks():
+    """논문이 실제로 쓴 최적화 배치가 통과해야 한다.
+
+    이 배치는 bottom X check가 창 안에서 두 번 기다린다 -- 층 3은 갈 자리 ``(1,-3)``
+    이 없어서, 층 5는 앞이 다른 check라서 -- 그리고 층 6에 마지막 data를 만난다.
+    빈 자리에서 측정하거나 check-check를 에러로 내면 라운드 0에서 ``check_x 0``이
+    support ``[0, 40]`` 중 ``[0]``만 먹었다고 거절된다.
+    """
+    code = build_directional_code("N2ESEN2", 4, 4)
+    layout = {site: qubit for site, qubit in walk_layout(code, "N2ESEN2").items()
+              if qubit.role != ROUTING}
+    for home, seat in PAPER_FIGURE_7_DATA_SHIFTS.items():
+        layout[seat] = Qubit(DATA, layout.pop(home).index, seat)
+    _, shifts = route_window_shortening(code, "N2ESEN2")
+    layout = {site: qubit for site, qubit in layout.items()
+              if (qubit.role, qubit.index) not in shifts}   # 옮긴 check는 태어난다
+    for serial, site in enumerate(PAPER_FIGURE_7_ROUTING):
+        assert site not in layout
+        layout[site] = Qubit(ROUTING, serial, site)
+    assert sum(1 for q in layout.values() if q.role == ROUTING) == 30
+
+    steps = parse_directional_word("N2ESEN2")
+    for round_index in range(ROUNDS_TESTED):
+        walk_round(code, layout,
+                   steps if round_index % 2 == 0 else reverse_steps(steps),
+                   births_for(code, "N2ESEN2", round_index, layout, shifts))
 
 
 def test_nothing_more_can_be_removed():
@@ -684,7 +740,7 @@ def test_the_single_user_condition_only_gates_the_second_substep():
     일어나므로 창이 늦게 열리는 data 중 일부만 옮겨진다.
     """
     code = build_directional_code("N2ESEN2", 4, 4)
-    layout, shifts = shorten_route_windows(code, "N2ESEN2")
+    layout, shifts = route_window_shortening(code, "N2ESEN2")
     home = {col: hardware_site(edge)
             for col, edge in enumerate(code.qubits)}
     moved_data = [site for site, qubit in layout.items()
@@ -700,28 +756,29 @@ def test_a_missing_check_is_caught():
 
     원문의 "no **check-start collision**" 조건을 우리는 사전에 안 보고 검증으로
     대신한다. 두 check가 같은 자리를 쓰면 배치 dict에서 한쪽이 덮여 사라지는데,
-    그 결과가 여기서 잡히는지를 고정한다.
+    그 결과가 여기서 잡히는지를 고정한다. 빠진 check 자리를 뒤따르던 것이 밟아 한
+    층에 gate가 겹치거나, 아니면 대조에서 걸린다.
     """
     code = build_directional_code("NESEN", 2, 2)
     layout = walk_layout(code, "NESEN")
     x_starts, _ = check_starts(code, "NESEN")
     del layout[x_starts[1]]
-    with pytest.raises(ValueError, match="support"):
+    with pytest.raises(ValueError, match="support|two gates"):
         walk_round(code, layout, parse_directional_word("NESEN"))
 
 
 def test_a_check_on_a_data_site_is_caught():
     """check를 data 자리에 놓으면 그 data가 덮여 흐름이 깨진다.
 
-    원문의 "no **data-check overlap**" 조건 쪽이다. 덮인 자리에서 걷는 것끼리 만나
-    ``two checks meet``으로 걸린다.
+    원문의 "no **data-check overlap**" 조건 쪽이다. 덮인 자리에서 걷는 것끼리 겹쳐
+    ``two gates in one layer``로 걸린다 (check-check는 기다리므로 에러가 아니다).
     """
     code = build_directional_code("NESEN", 2, 2)
     layout = walk_layout(code, "NESEN")
     site = next(s for s, qubit in sorted(layout.items())
                 if qubit.role == DATA)
     layout[site] = Qubit(CHECK_X, 0, site)
-    with pytest.raises(ValueError, match="meet|support"):
+    with pytest.raises(ValueError, match="two gates|support"):
         walk_round(code, layout, parse_directional_word("NESEN"))
 
 
@@ -738,7 +795,7 @@ def test_moved_data_lands_on_a_vacated_site(word, L1, L2):
     """
     code = build_directional_code(word, L1, L2)
     plain = walk_layout(code, word)
-    layout, _ = shorten_route_windows(code, word)
+    layout, _ = route_window_shortening(code, word)
     home_of = {col: hardware_site(edge)
                for col, edge in enumerate(code.qubits)}
     seats = {qubit.index: site for site, qubit in layout.items()
@@ -1023,7 +1080,7 @@ def test_the_pruned_layout_gives_the_same_circuit(word, L1, L2):
     """
     code = build_directional_code(word, L1, L2)
     plain = walk_memory_z_base(code, word, 3, walk_layout(code, word))
-    pruned = walk_memory_z_base(code, word, 3, *shorten_route_windows(code, word))
+    pruned = walk_memory_z_base(code, word, 3, *route_window_shortening(code, word))
     assert (pruned.num_detectors, pruned.num_observables) \
         == (plain.num_detectors, plain.num_observables)
     assert pruned.num_qubits < plain.num_qubits
@@ -1043,7 +1100,7 @@ def test_a_check_is_reborn_where_it_was_read(pruned):
     엉뚱한 곳에 reset을 거는 것이다.
     """
     code = build_directional_code("NESEN", 2, 2)
-    layout, shifts = (shorten_route_windows(code, "NESEN") if pruned
+    layout, shifts = (route_window_shortening(code, "NESEN") if pruned
                       else (walk_layout(code, "NESEN"), {}))
     schedule, _, _ = walk_schedule(code, "NESEN", 3, layout, shifts)
     for earlier, later in zip(schedule, schedule[1:]):
@@ -1055,7 +1112,7 @@ def test_a_check_is_reborn_where_it_was_read(pruned):
 def test_every_check_is_reset_and_measured_once_per_round_when_pruned():
     """줄인 배치에서도 라운드마다 모든 check가 한 번 켜지고 한 번 읽힌다."""
     code = build_directional_code("NESEN", 2, 2)
-    layout, shifts = shorten_route_windows(code, "NESEN")
+    layout, shifts = route_window_shortening(code, "NESEN")
     schedule, _, _ = walk_schedule(code, "NESEN", 3, layout, shifts)
     for moments in schedule:
         resets = [key for reset, _, _ in moments for key, _ in reset]
