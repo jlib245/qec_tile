@@ -9,10 +9,14 @@ worker 스케줄링은 비결정적이라 실행마다 count가 달라진다 —
 """
 from __future__ import annotations
 
+import numpy as np
 import sinter
 import stim
 from ldpc import SinterBpOsdDecoder
+from ldpc.ckt_noise.dem_matrices import detector_error_model_to_check_matrices
 from ldpc.sinter_decoders import SinterLsdDecoder
+
+from .decode import VibeLsdDecoder
 
 
 def _osd(osd_method: str, osd_order: int):
@@ -20,6 +24,36 @@ def _osd(osd_method: str, osd_order: int):
     return lambda: SinterBpOsdDecoder(
         bp_method="minimum_sum", max_iter=50, ms_scaling_factor=1.0,
         osd_method=osd_method, osd_order=osd_order)
+
+
+class SinterVibeLsdDecoder(sinter.Decoder):
+    """``VibeLsdDecoder``를 sinter worker에서 돌리는 래퍼 -- ldpc의 SinterLsdDecoder와
+    같은 골격.
+
+    DEM은 worker가 파일로 받으므로 행렬과 앙상블은 여기서 짓고, shot은 b8로 읽고 쓴다.
+    """
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs                       # VibeLsdDecoder 손잡이 그대로
+
+    def decode_via_files(self, *, num_shots, num_dets, num_obs, dem_path,
+                         dets_b8_in_path, obs_predictions_b8_out_path,
+                         tmp_dir):
+        dem = stim.DetectorErrorModel.from_file(dem_path)
+        matrices = detector_error_model_to_check_matrices(
+            dem, allow_undecomposed_hyperedges=True)
+        decoder = VibeLsdDecoder(matrices.check_matrix.toarray(),
+                                 matrices.priors, **self.kwargs)
+        observables = matrices.observables_matrix.toarray().astype(np.uint8)
+        shots = stim.read_shot_data_file(path=dets_b8_in_path, format="b8",
+                                         num_detectors=num_dets)
+        predictions = np.zeros((num_shots, num_obs), dtype=bool)
+        for i in range(num_shots):
+            correction = decoder.decode(shots[i].astype(np.uint8))
+            predictions[i] = (observables @ correction) % 2
+        stim.write_shot_data_file(data=predictions,
+                                  path=obs_predictions_b8_out_path,
+                                  format="b8", num_observables=num_obs)
 
 
 # 인스턴스가 아니라 factory다: sinter는 디코더를 각 worker로 pickle하고,
@@ -32,6 +66,8 @@ SINTER_DECODERS = {
     "bplsd_0": lambda: SinterLsdDecoder(          # Hillmann et al. 설정
         bp_method="minimum_sum", max_iter=30,
         ms_scaling_factor=0.625, lsd_order=0),
+    "vibelsd_32": lambda: SinterVibeLsdDecoder(ensemble=32, max_iter=20),
+    "vibelsd_200": lambda: SinterVibeLsdDecoder(ensemble=200, max_iter=15),
 }
 
 

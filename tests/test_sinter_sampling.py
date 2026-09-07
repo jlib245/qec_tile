@@ -38,6 +38,16 @@ def test_registry_mirrors_serial_except_lsd_cs():
     assert set(SINTER_DECODERS) == set(DECODERS) - {"bplsd_cs7"}
 
 
+def test_vibelsd_collects_through_sinter():
+    """VibeLSD가 worker로 pickle되어 ``decode_via_files`` 계약대로 돈다."""
+    code = paper_code(*SMALL)
+    stats = collect({"x": memory_z_circuit(code, 2, 0.02)},
+                    decoder="vibelsd_32", max_shots=40, workers=2)
+    shots, errors = stats["x"]
+    assert 0 < shots <= 40
+    assert 0 <= errors <= shots
+
+
 def test_max_errors_stops_early():
     """rounds=2에서 p=0.05는 shot의 ~30%를 실패시키므로 오류 5개가 빨리 모인다."""
     code = paper_code(*SMALL)

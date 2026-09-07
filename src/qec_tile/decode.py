@@ -17,7 +17,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
-from ldpc import BpLsdDecoder, BpOsdDecoder
+from ldpc import BpDecoder, BpLsdDecoder, BpOsdDecoder
+from ldpc.lsd_decoder import LsdDecoder
 
 
 def _prior(channel):
@@ -75,7 +76,65 @@ def make_lsd_decoder(H: np.ndarray, channel, *, bp_method: str = "minimum_sum",
 
 # 디코더 registry: name -> (H, channel) -> decoder. 각각 기준 설정에 못박아두어
 # CSV/파일명의 디코더 축이 스스로를 설명하게 한다.
+class VibeLsdDecoder:
+    """VibeLSD (Koutsioumpas, Noszko, Sayginel, Webster & Roffe, arXiv:2508.15743).
+
+    error mechanism을 무작위 순열한 직렬 min-sum BP ``ensemble``개를 차례로 돌려,
+    ``converged``개가 수렴하면 멈추고 수렴한 후보 중 prior 우도가 가장 높은(가장
+    가벼운) 것을 고른다. 하나도 수렴하지 않으면 정규화한 LLR의 평균
+    ``(1/L) Σ LLR_i / ‖LLR_i‖``을 LSD에 넘긴다.
+
+    직렬 스케줄은 앞 check가 방금 갱신한 메시지를 뒤 check가 바로 쓰므로 순서마다
+    다른 고정점에 닿는다. 조밀한 DEM(hyperedge 차수 10 이상)에서 병렬 BP 하나가
+    못 푸는 shot을 여러 순서가 나눠 푼다 -- 우리 walk 회로에서 BP+OSD-CS7 대비
+    8배 이상 낮았다.
+
+    ``decode``는 ``BpOsdDecoder``와 같은 계약(오류 벡터)이라 registry에 그대로 든다.
+    """
+
+    def __init__(self, H, channel, *, ensemble: int = 32, converged: int = 5,
+                 max_iter: int = 20, ms_scaling_factor: float = 1.0,
+                 lsd_order: int = 0, seed: int = 0):
+        H = np.asarray(H, dtype=np.uint8)
+        channel = np.asarray(channel, dtype=float)
+        if channel.ndim == 0:
+            channel = np.full(H.shape[1], float(channel))
+        rng = np.random.default_rng(seed)
+        self.members = [
+            BpDecoder(H, error_channel=list(channel), bp_method="minimum_sum",
+                      max_iter=max_iter, ms_scaling_factor=ms_scaling_factor,
+                      schedule="serial",
+                      serial_schedule_order=list(rng.permutation(H.shape[1])))
+            for _ in range(ensemble)]
+        self.lsd = LsdDecoder(H, lsd_order=lsd_order)
+        self.converged = converged
+        self.log_weight = np.log((1 - channel) / channel)   # 열별 -log 우도
+
+    def decode(self, syndrome):
+        best, best_weight, hits, llrs = None, np.inf, 0, []
+        for member in self.members:
+            candidate = member.decode(syndrome)
+            llr = np.asarray(member.log_prob_ratios, dtype=float)
+            norm = np.linalg.norm(llr)
+            if norm > 0:
+                llrs.append(llr / norm)
+            if member.converge:
+                hits += 1
+                weight = float(self.log_weight @ candidate)
+                if weight < best_weight:
+                    best, best_weight = candidate.copy(), weight
+                if hits >= self.converged:
+                    break
+        if best is not None:
+            return best
+        return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
+
+
 DECODERS = {
+    # VibeLSD: vibe 논문 기본(앙상블 32, 20회)과 directional 논문이 쓴 설정(200, 15회).
+    "vibelsd_32": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=32, max_iter=20),
+    "vibelsd_200": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
+                                                max_iter=15),
     # BB code 관례 (Bravyi et al.): OSD combination sweep, order 7.
     "bposd_cs7": lambda H, ch: make_decoder(H, ch, osd_method="osd_cs",
                                             osd_order=7),

@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from qec_tile.decode import (DECODERS, code_capacity_counts,
+from qec_tile.decode import (DECODERS, VibeLsdDecoder, code_capacity_counts,
                              code_capacity_block_rate, make_decoder,
                              per_logical_rate, sample_residuals)
 from qec_tile.tile import paper_code
@@ -68,7 +68,50 @@ def test_decoder_is_required():
 
 
 def test_all_decoders_are_registered():
-    assert set(DECODERS) == {"bposd_cs7", "bposd_0", "bplsd_0", "bplsd_cs7"}
+    assert set(DECODERS) == {"bposd_cs7", "bposd_0", "bplsd_0", "bplsd_cs7",
+                             "vibelsd_32", "vibelsd_200"}
+
+
+# --- VibeLSD -----------------------------------------------------------------
+
+def test_vibelsd_members_use_distinct_serial_schedules():
+    """앙상블 멤버는 error mechanism의 순열이 서로 다른 직렬 스케줄이다.
+
+    순열을 안 넘기면 전부 같은 스케줄이라 앙상블이 BP 하나와 같아진다. 시드가
+    같으면 순열이 재현되어 결과가 결정적이다.
+    """
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
+    orders = [tuple(member.serial_schedule_order) for member in decoder.members]
+    assert len(orders) == 8
+    assert len(set(orders)) == 8
+    assert all(sorted(order) == list(range(code.n)) for order in orders)
+    again = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
+    assert [tuple(m.serial_schedule_order) for m in again.members] == orders
+
+
+def test_vibelsd_correction_matches_the_syndrome():
+    """무엇을 돌려주든 ``H @ e_hat == s`` -- 수렴한 후보든 LSD fallback이든."""
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(code.HZ, 0.08, ensemble=8, seed=1)
+    rng = np.random.default_rng(1)
+    for _ in range(100):
+        e = (rng.random(code.n) < 0.08).astype(np.uint8)
+        syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
+        e_hat = decoder.decode(syndrome)
+        assert (((code.HZ @ e_hat) % 2) == syndrome).all()
+
+
+def test_vibelsd_corrects_single_errors():
+    """d >= 3이므로 weight 1인 오류는 유일하게 디코딩된다."""
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
+    _, LZ = code.logicals()
+    for i in range(code.n):
+        e = np.zeros(code.n, dtype=np.uint8)
+        e[i] = 1
+        ehat = decoder.decode(((code.HZ @ e) % 2).astype(np.uint8))
+        assert not ((LZ @ ((e ^ ehat) % 2)) % 2).any()
 
 
 def test_unknown_decoder_is_rejected():
