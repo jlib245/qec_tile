@@ -273,6 +273,42 @@ def route_windows(code, word: str) -> dict[tuple[str, int], tuple[int, int]]:
     return windows
 
 
+def detours(code, word: str) -> dict[tuple[str, int], list[list[Site]]]:
+    """check마다 창 안의 우회로들 -- data를 안 만나는 연속 층에 밟는 자리 목록.
+
+    층 m에 ``start + h_m``이 data 자리가 아니면 그 층은 우회이고, 그때 check가
+    도착하는 자리는 ``start + S_{m+1}``이다. 창 밖은 세지 않는다 -- 앞뒤 죽은 구간은
+    route window shortening이 잘라내는 몫이다.
+
+    논문 trace pruning의 "displacement of early directional word steps"가 이것이다:
+    우회로를 통째로 비우면 check는 그 층들을 제자리에서 기다리고, 그동안 data가
+    밀리는 만큼 밀려 와서 다음 data를 제자리에서 만난다. 하나만 비우면 한 층만
+    기다려 다른 walker와 겹치므로 묶음이 단위다.
+    """
+    steps = parse_directional_word(word)
+    forward = partial_sums(steps)
+    crossings = walk_crossings(steps)
+    data_sites = {hardware_site(edge) for edge in code.qubits}
+    windows = route_windows(code, word)
+    x_starts, z_starts = check_starts(code, word)
+    runs_of = {}
+    for role, starts in ((CHECK_X, x_starts), (CHECK_Z, z_starts)):
+        for index, (start_x, start_y) in enumerate(starts):
+            first, last = windows[(role, index)]
+            runs, run = [], []
+            for m in range(first, last + 1):
+                if (start_x + crossings[m][0],
+                        start_y + crossings[m][1]) in data_sites:
+                    if run:
+                        runs.append(run)
+                        run = []
+                else:
+                    run.append((start_x + forward[m + 1][0],
+                                start_y + forward[m + 1][1]))
+            runs_of[(role, index)] = runs
+    return runs_of
+
+
 def _optimiser(code, word: str, move_data: bool = True,
                eager: bool = False):
     """route window shortening과 trace pruning이 **같은 상태 위에서** 돌게 묶는다.
@@ -298,6 +334,8 @@ def _optimiser(code, word: str, move_data: bool = True,
                 for index, site in enumerate(starts)}
     home_of = {col: hardware_site(edge)
                for col, edge in enumerate(code.qubits)}
+    col_at_home = {home: col for col, home in home_of.items()}
+    runs_of = detours(code, word)
     check_sites = set(start_of.values())
     opens = {}                                 # data 열 -> 처음 먹히는 층
     for col, (home_x, home_y) in home_of.items():
@@ -416,6 +454,70 @@ def _optimiser(code, word: str, move_data: bool = True,
             if not moved:                      # 1b가 1a를 풀어줄 수 있어 되돌아온다
                 return total
 
+    def detour_pruning() -> int:
+        """우회로 묶음 제거 한 바퀴: routing은 지우고, data의 집이면 그 열을 한 칸 밀어 앉힌다.
+
+        묶음이 단위다 -- 하나만 지우면 check가 한 층만 기다려 다른 walker와 겹친다.
+        data가 낀 우회로는 data-start shift가 필요하므로 ``move_data``가 꺼져 있으면
+        건너뛴다.
+        """
+        total = 0
+        for runs in runs_of.values():
+            for run in runs:
+                # 긴 prefix부터 -- 우회로 끝자리를 밟아야 하는 check도 있다
+                for length in range(len(run), 0, -1):
+                    prefix = run[:length]
+                    homes = [col_at_home[site] for site in prefix
+                             if site in col_at_home]
+                    if homes and not move_data:
+                        continue
+                    added = set(prefix) - deleted     # 집도 넣는다: routing이 다시 깔리면 안 된다
+                    moved = [col for col in homes if dshift[col] == 0]
+                    if not added and not moved:       # 이미 적용된 우회로
+                        break
+                    deleted.update(added)
+                    for col in moved:
+                        dshift[col] = 1               # 집에서 한 칸 밀린 자리에서 출발
+                    if survives():
+                        total += 1
+                        break
+                    deleted.difference_update(added)
+                    for col in moved:
+                        dshift[col] = 0
+        return total
+
+    def edge_pruning() -> int:
+        """가장자리 줄 통째 삭제 한 바퀴: 네 바깥 줄마다 전체 -> 홀수 절반 -> 짝수 절반.
+
+        "iteratively deleting routing qubits near the edges of the layout". 한 줄의
+        routing은 이웃 check들의 우회를 서로 떠받치므로 하나씩은 못 빼고 같이 빼야
+        전부가 기다리며 맞는다. 줄 단위·절반 단위는 본문이 정하지 않은 우리 구성이다.
+        """
+        total = 0
+        while True:
+            routing = [site for site, qubit in build().items()
+                       if qubit.role == ROUTING]
+            gone = 0
+            for axis in (0, 1):                      # x 줄, y 줄
+                along = 1 - axis
+                for extreme in (min, max):
+                    edge = extreme(site[axis] for site in routing)
+                    line = [site for site in routing if site[axis] == edge]
+                    for group in (line,
+                                  [site for site in line if site[along] % 2],
+                                  [site for site in line if site[along] % 2 == 0]):
+                        added = set(group) - deleted   # 이 바퀴에 이미 지운 것과 겹칠 수 있다
+                        if not added:
+                            continue
+                        deleted.update(added)
+                        if survives():
+                            gone += len(added)
+                            break
+                        deleted.difference_update(added)
+            total += gone
+            if not gone:
+                return total
+
     def trace_pruning(order) -> int:
         """trace pruning 한 바퀴: 가장자리부터 routing을 하나씩 지워본다."""
         total = 0
@@ -439,7 +541,8 @@ def _optimiser(code, word: str, move_data: bool = True,
     def result():
         return build(), {key: j for key, j in shift.items() if j}
 
-    return route_window_shortening, trace_pruning, outward, result
+    return (route_window_shortening, detour_pruning, edge_pruning, trace_pruning,
+            outward, result)
 
 
 def route_window_shortening(code, word: str, move_data: bool = True):
@@ -478,7 +581,8 @@ def route_window_shortening(code, word: str, move_data: bool = True):
     검증하는 방식으로는 그 조합을 못 넘는다 (중간을 하나만 빼면 갈 데 없는 walker가
     서고 다음 층에 겹친다).
     """
-    route_window_shortening, _, _, result = _optimiser(code, word, move_data)
+    route_window_shortening, _, _, _, _, result = _optimiser(code, word,
+                                                             move_data)
     route_window_shortening()
     return result()
 
@@ -742,6 +846,14 @@ def optimise_routing(code, word: str, thorough: bool = False):
     고른다: "including variants **with and without data-start shifts** ... Among all
     valid candidates, we choose the one with the smallest number of physical qubits."
 
+    trace pruning은 세 단위로 한다 -- 우회로 묶음(``detours``), 가장자리 줄, 단일 자리.
+    경계 check가 창 안에서 도는 우회로와 그것을 떠받치는 바깥 줄은 통째로 비워야
+    그 층들을 기다리며 맞아떨어지고, 하나씩 지우면 전부 실패한다. 묶음 단위는 원문의
+    "different combinations of greedy deletions"를 우리가 구체화한 것이다. 원문의
+    "shifting the remaining qubits to fill the newly introduced hole"은 문자대로
+    (줄 압축, Algorithm 1의 순차 적용) 해석해 보았으나 논문 수치를 재현하지 못했다.
+    이 묶음으로는 논문 코드 다섯 개에서 논문과 같거나 1~2개 적게 나온다.
+
     최종 후보는 원문의 기준을 다 통과해야 한다 -- support(패스마다), 그리고
     detector·observable 불변과 DEM 결정성(여기서 한 번).
     """
@@ -761,14 +873,14 @@ def optimise_routing(code, word: str, thorough: bool = False):
 
     best = None
     for move_data in (True, False):
-        (route_window_shortening, trace_pruning,
+        (route_window_shortening, detour_pruning, edge_pruning, trace_pruning,
          outward, result) = _optimiser(code, word, move_data)
         orders = ((outward,) if not thorough
                   else (outward, lambda site: -outward(site),
                         lambda site: (site[0], site[1])))
         for order in orders:
-            while route_window_shortening() + trace_pruning(order):
-                pass                       # 둘이 서로를 풀어준다
+            while (route_window_shortening() + edge_pruning() + detour_pruning() + trace_pruning(order)):
+                pass                       # 셋이 서로를 풀어준다
             candidate = result()
             if not acceptable(candidate):
                 continue

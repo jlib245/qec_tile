@@ -7,8 +7,8 @@ from qec_tile.directional import (DIRECTIONS, build_directional_code,
                                   walk_edges)
 from qec_tile.noise_model import NoiseModel
 from qec_tile.walk2 import (CHECK_X, CHECK_Z, DATA, ROUTING, ROUNDS_TESTED,
-                            Qubit, births_for, check_starts, route_windows,
-                            flow_step,
+                            Qubit, births_for, check_starts, detours,
+                            optimise_routing, route_windows, flow_step,
                             partial_sums, trace_pruning, route_window_shortening,
                             reverse_steps, round_births, walk_crossings,
                             walk_layout, walk_memory_z_base, walk_round,
@@ -711,6 +711,68 @@ def test_the_paper_figure_7_layout_walks():
         walk_round(code, layout,
                    steps if round_index % 2 == 0 else reverse_steps(steps),
                    births_for(code, "N2ESEN2", round_index, layout, shifts))
+
+
+def test_a_detour_is_the_walk_between_two_data_meetings():
+    """우회로 = 창 안에서 data를 안 만나는 연속 층에 check가 밟는 자리들.
+
+    4x4 ``N2ESEN2``에서 우회로는 bottom X 넷과 top X 넷에만 있다. bottom X는 층 2에
+    data를 먹고 S, E, N으로 돌아 층 6에 마지막 data를 먹으므로 그 세 층에 밟는 자리
+    ``A + S_4, S_5, S_6``이 우회로다. 창 밖의 죽은 구간은 우회로가 아니고(그건 창
+    절단 몫), 밟는 자리는 떠나는 자리 ``S_m``이 아니라 도착하는 자리 ``S_{m+1}``이다.
+    """
+    code = build_directional_code("N2ESEN2", 4, 4)
+    found = detours(code, "N2ESEN2")
+    assert found[(CHECK_X, 0)] == [[(1, -3), (2, -3), (2, -2)]]
+    assert found[(CHECK_X, 6)] == [[(0, 10), (1, 10), (1, 9)]]
+    assert found[(CHECK_X, 10)] == []                  # 벌크
+    assert sum(1 for runs in found.values() if runs) == 8
+
+
+def test_group_deletions_reach_the_paper():
+    """묶음 greedy(우회로 + 가장자리 줄)로 논문 Figure 7의 30 이하에 닿는다 -- 실측 29.
+
+    단일 삭제로는 47에서 하나도 못 뺀다: 지운 자리를 밟던 check가 한 층만 기다려
+    다른 walker와 겹친다. 우회로를 통째로(아래 줄 8개), 위 data를 한 칸 내리며 그 줄
+    routing을 같이(4+4), 왼쪽 가장자리 줄의 절반(``(-2,5),(-2,7)``)을 같이 지워야
+    전부가 기다리며 맞아떨어진다. 논문보다 하나 적은 것은 오른쪽 경계 data를 두 칸
+    내리는 대신 논문이 routing을 남긴 자리 차이다.
+    """
+    code = build_directional_code("N2ESEN2", 4, 4)
+    layout, _ = optimise_routing(code, "N2ESEN2")
+    assert sum(1 for q in layout.values() if q.role == ROUTING) == 29
+
+
+def test_an_edge_line_goes_together_or_not_at_all():
+    """가장 바깥 줄의 routing은 통째로 지워야 산다 -- 하나씩은 전부 실패한다.
+
+    4x4 ``N2ESEN2``의 창 절단 배치에서 맨 아래 줄 ``y=-3``, bottom X 넷 아래의 routing
+    8개(``x = 1..8``)는 넷의 우회로가 서로 떠받치는 자리다. 하나만 빼면 그 check만 한 층
+    기다려 이웃과 겹치고(``two gates in one layer``), 여덟을 같이 빼면 넷이 다 기다리며
+    맞는다. 줄 끝의 ``(-1,-3)``은 혼자 빠지는 꼬리 자리라 뺀다. 논문의 "iteratively
+    deleting routing qubits near the edges"를 줄 단위로 읽는 근거다.
+    """
+    code = build_directional_code("N2ESEN2", 4, 4)
+    layout, shifts = route_window_shortening(code, "N2ESEN2")
+    bottom = [site for site, qubit in layout.items()
+              if qubit.role == ROUTING and site[1] == -3 and site[0] >= 1]
+    assert len(bottom) == 8
+
+    def survives(trial) -> bool:
+        steps = parse_directional_word("N2ESEN2")
+        qubit_at = dict(trial)
+        try:
+            for round_index in range(ROUNDS_TESTED):
+                walk_round(code, qubit_at,
+                           steps if round_index % 2 == 0 else reverse_steps(steps),
+                           births_for(code, "N2ESEN2", round_index, qubit_at, shifts))
+            return True
+        except ValueError:
+            return False
+
+    assert survives({s: q for s, q in layout.items() if s not in bottom})
+    for site in bottom:
+        assert not survives({s: q for s, q in layout.items() if s != site})
 
 
 def test_nothing_more_can_be_removed():
