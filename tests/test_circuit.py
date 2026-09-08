@@ -2,8 +2,8 @@
 import numpy as np
 import pytest
 
-from qec_tile.circuit import (circuit_failure_rate, memory_z_base,
-                              memory_z_circuit)
+from qec_tile.circuit import (circuit_failure_counts, circuit_failure_rate,
+                              memory_z_base, memory_z_circuit)
 from qec_tile.tile import paper_code
 
 SMALL = ("b3w6", 4, 4)
@@ -73,6 +73,28 @@ def test_zero_noise_circuit_never_fails():
     circuit = memory_z_circuit(code, rounds=2, p=0.0)
     assert circuit_failure_rate(circuit, shots=20, decoder="bposd_cs7",
                                 seed=0) == 0.0
+
+
+def test_failure_counts_count_every_flipped_observable():
+    """블록 실패 외에 뒤집힌 observable 수를 직접 센다 -- 독립 가정으로 역산하지 않는다.
+
+    shot 하나가 observable 셋을 뒤집으면 ``logical_flips``에 3이 더해지므로
+    ``block_fails <= logical_flips <= k * shots``이고, 같은 seed의
+    ``circuit_failure_rate``와 블록 수가 일치한다. 잡음이 없으면 전부 0이다.
+    """
+    code = paper_code(*SMALL)
+    noisy = memory_z_circuit(code, rounds=2, p=0.03)
+    counts = circuit_failure_counts(noisy, shots=60, decoder="bposd_cs7",
+                                    seed=5)
+    assert counts.shots == 60
+    assert counts.k == noisy.num_observables == code.k
+    assert counts.block_fails <= counts.logical_flips <= counts.k * 60
+    assert counts.block_fails > 0                     # p=0.03이면 몇 개는 실패한다
+    assert counts.block_fails == round(60 * circuit_failure_rate(
+        noisy, shots=60, decoder="bposd_cs7", seed=5))
+    clean = circuit_failure_counts(memory_z_circuit(code, rounds=2, p=0.0),
+                                   shots=20, decoder="bposd_cs7", seed=0)
+    assert (clean.block_fails, clean.logical_flips) == (0, 0)
 
 
 def test_circuit_rate_is_deterministic_given_a_seed():

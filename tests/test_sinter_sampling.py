@@ -14,16 +14,26 @@ def test_collect_returns_stats_for_every_circuit():
                 ("L2", 0.05): memory_z_circuit(code, 2, 0.05)}
     stats = collect(circuits, decoder="bposd_cs7", max_shots=50, workers=2)
     assert set(stats) == set(circuits)
-    for shots, errors in stats.values():
-        assert 0 < shots <= 50
-        assert 0 <= errors <= shots
+    for counts in stats.values():
+        assert 0 < counts.shots <= 50
+        assert 0 <= counts.block_fails <= counts.shots
 
 
 def test_zero_noise_gives_zero_errors():
     code = paper_code(*SMALL)
     stats = collect({"clean": memory_z_base(code, 2)}, decoder="bposd_cs7",
                     max_shots=30, workers=2)
-    assert stats["clean"][1] == 0
+    assert (stats["clean"].block_fails, stats["clean"].logical_flips) == (0, 0)
+    assert stats["clean"].k == code.k
+
+
+def test_collect_counts_logical_flips():
+    """sinter의 observable 조합 카운트에서 뒤집힌 observable 수를 직접 센다."""
+    code = paper_code(*SMALL)
+    counts = collect({"x": memory_z_circuit(code, 2, 0.05)},
+                     decoder="bposd_cs7", max_shots=100, workers=2)["x"]
+    assert counts.k == code.k
+    assert 0 < counts.block_fails <= counts.logical_flips <= counts.k * counts.shots
 
 
 def test_unknown_decoder_is_rejected():
@@ -43,9 +53,8 @@ def test_vibelsd_collects_through_sinter():
     code = paper_code(*SMALL)
     stats = collect({"x": memory_z_circuit(code, 2, 0.02)},
                     decoder="vibelsd_32", max_shots=40, workers=2)
-    shots, errors = stats["x"]
-    assert 0 < shots <= 40
-    assert 0 <= errors <= shots
+    assert 0 < stats["x"].shots <= 40
+    assert 0 <= stats["x"].block_fails <= stats["x"].shots
 
 
 def test_max_errors_stops_early():
@@ -54,6 +63,5 @@ def test_max_errors_stops_early():
     noisy = memory_z_circuit(code, 2, 0.05)
     stats = collect({"x": noisy}, decoder="bposd_cs7",
                     max_shots=10_000, max_errors=5, workers=2)
-    shots, errors = stats["x"]
-    assert errors >= 5
-    assert shots < 10_000
+    assert stats["x"].block_fails >= 5
+    assert stats["x"].shots < 10_000

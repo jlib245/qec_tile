@@ -16,7 +16,7 @@ from ldpc import SinterBpOsdDecoder
 from ldpc.ckt_noise.dem_matrices import detector_error_model_to_check_matrices
 from ldpc.sinter_decoders import SinterLsdDecoder
 
-from .decode import VibeLsdDecoder
+from .decode import FailureCounts, VibeLsdDecoder
 
 
 def _osd(osd_method: str, osd_order: int):
@@ -74,8 +74,12 @@ SINTER_DECODERS = {
 def collect(circuits: dict[object, stim.Circuit], decoder: str,
             max_shots: int, max_errors: int | None = None,
             workers: int = 8,
-            progress: bool = True) -> dict[object, tuple[int, int]]:
-    """모든 circuit을 병렬로 디코딩 -> ``{key: (shots, errors)}``.
+            progress: bool = True) -> dict[object, FailureCounts]:
+    """모든 circuit을 병렬로 디코딩 -> ``{key: FailureCounts}``.
+
+    sinter의 ``count_observable_error_combos``가 shot마다 뒤집힌 observable 조합을
+    ``obs_mistake_mask=E_E_``(E = 뒤집힘) 키로 세어 주므로, 거기서 ``logical_flips``
+    를 직접 합산한다 -- ``circuit_failure_counts``와 같은 집계다.
 
     task가 metadata에 인덱스를 지고 다니는 이유: sinter는 완료 순서로 stat을
     돌려주고, JSON은 tuple 키를 망친다.
@@ -94,7 +98,8 @@ def collect(circuits: dict[object, stim.Circuit], decoder: str,
         if any(inst.type == "error" for inst in dem.flattened()):
             noisy[key] = circuit
         else:
-            results[key] = (max_shots, 0)
+            results[key] = FailureCounts(max_shots, 0, 0,
+                                         circuit.num_observables)
     if not noisy:
         return results
 
@@ -108,8 +113,14 @@ def collect(circuits: dict[object, stim.Circuit], decoder: str,
         custom_decoders={decoder: build()},
         max_shots=max_shots,
         max_errors=max_errors,
+        count_observable_error_combos=True,
         print_progress=progress,     # stderr로 나가니 CSV/stdout은 깨끗하다
     )
-    results.update({keys[stat.json_metadata["index"]]:
-                    (stat.shots, stat.errors) for stat in task_stats})
+    for stat in task_stats:
+        key = keys[stat.json_metadata["index"]]
+        flips = sum(count * name.split("=", 1)[1].count("E")
+                    for name, count in stat.custom_counts.items()
+                    if name.startswith("obs_mistake_mask="))
+        results[key] = FailureCounts(stat.shots, stat.errors, flips,
+                                     noisy[key].num_observables)
     return results

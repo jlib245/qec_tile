@@ -22,8 +22,9 @@ optimised는 optimise_routing이 줄인 배치 (파일명 stem에 _opt가 붙는
 때는 --out을 명시적으로 넘긴다.
 
 ``rate`` 열은 블록 비율이다 -- 코드의 k개 observable 중 하나라도 뒤집히면 그 shot이
-실패다. plot.py --per-logical이 변환할 수 있도록 k 열이 함께 따라가고, 여기서는 k로
-나누지 않는다.
+실패다. ``flips``는 shot에 걸쳐 뒤집힌 observable 수의 합이라 ``flips/(shots*k)``가
+per-logical 실측이고, plot.py --per-logical이 그것을 쓴다 (없는 옛 CSV는 독립 가정
+식으로 k를 되나눈다). 여기서는 k로 나누지 않는다.
 
 사용법:
     python scripts/benchmark.py --decoder bposd --noise capacity
@@ -36,10 +37,9 @@ import csv
 import os
 import time
 
-from qec_tile.circuit import (circuit_failure_rate, memory_z_base,
+from qec_tile.circuit import (circuit_failure_counts, memory_z_base,
                               memory_z_circuit)
-from qec_tile.decode import (DECODERS, block_failure_rate,
-                             code_capacity_block_rate)
+from qec_tile.decode import (DECODERS, code_capacity_counts, failure_counts)
 from qec_tile.noise_model import NoiseModel
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile import config
@@ -82,7 +82,7 @@ def uniform_noise(p: float) -> NoiseModel:
                                    "RX": p, "M": p, "MR": p, "MRX": p})
 
 FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
-          "meas_error", "seed", "shots", "fails", "rate", "sec"]
+          "meas_error", "seed", "shots", "fails", "flips", "rate", "sec"]
 
 
 def parse_floats(spec: str) -> list[float]:
@@ -138,15 +138,17 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
         return
     stats = collect(circuits, args.decoder, max_shots=args.shots,
                     max_errors=args.max_errors, workers=args.workers)
-    for (label, p), (shots, fails) in sorted(stats.items()):
+    for (label, p), counts in sorted(stats.items()):
         code, rounds = codes[label]
+        rate = counts.block_fails / counts.shots
         writer.writerow(dict(
             tile=(args.word or args.tile), decoder=args.decoder,
             noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
-            p=p, meas_error="", seed="", shots=shots, fails=fails,
-            rate=fails / shots, sec=""))
+            p=p, meas_error="", seed="", shots=counts.shots,
+            fails=counts.block_fails, flips=counts.logical_flips,
+            rate=rate, sec=""))
         csv_file.flush()
-        print(f"done  L={label} p={p} rate={fails / shots:.4f} ({shots} shots)")
+        print(f"done  L={label} p={p} rate={rate:.4f} ({counts.shots} shots)")
 
 
 def already_done(path: str) -> set[tuple]:
@@ -247,15 +249,14 @@ def main():
                 start = time.time()
                 if args.noise == "capacity":
                     meas_error = 0.0
-                    rate = code_capacity_block_rate(code, p, args.shots,
-                                                    args.decoder,
-                                                    seed=args.seed)
+                    counts = code_capacity_counts(code, p, args.shots,
+                                                  args.decoder, seed=args.seed)
                 elif args.noise == "pheno":
                     meas_error = (p if args.meas_error is None
                                   else args.meas_error)
                     channel = spacetime_channel(code, rounds, p, meas_error)
-                    rate = block_failure_rate(H, L_obs, channel, args.shots,
-                                              args.decoder, seed=args.seed)
+                    counts = failure_counts(H, L_obs, channel, args.shots,
+                                            args.decoder, seed=args.seed)
                 else:                          # 회로 잡음: p가 이미 박혀 있다
                     meas_error = ""
                     base = (walk_memory_z_base(code, args.word, rounds,
@@ -271,13 +272,15 @@ def main():
                         circuit = uniform_noise(p).noisy_circuit(base)
                     else:                      # si1000
                         circuit = NoiseModel.SI1000(p).noisy_circuit(base)
-                    rate = circuit_failure_rate(circuit, args.shots,
-                                                args.decoder, seed=args.seed)
+                    counts = circuit_failure_counts(circuit, args.shots,
+                                                    args.decoder,
+                                                    seed=args.seed)
+                rate = counts.block_fails / counts.shots
                 row = dict(tile=(args.word or args.tile), decoder=args.decoder,
                            noise=args.noise, rounds=rounds, L=label, n=code.n,
                            k=code.k, p=p, meas_error=meas_error,
-                           seed=args.seed, shots=args.shots,
-                           fails=round(rate * args.shots),
+                           seed=args.seed, shots=counts.shots,
+                           fails=counts.block_fails, flips=counts.logical_flips,
                            rate=rate, sec=round(time.time() - start, 1))
                 writer.writerow(row)
                 f.flush()

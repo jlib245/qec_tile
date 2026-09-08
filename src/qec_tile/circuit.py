@@ -24,7 +24,7 @@ import numpy as np
 import stim
 from ldpc.ckt_noise import detector_error_model_to_check_matrices
 
-from .decode import DECODERS
+from .decode import DECODERS, FailureCounts
 from .noise_model import NoiseModel
 
 
@@ -140,20 +140,23 @@ def memory_z_circuit(code, rounds: int, p: float) -> stim.Circuit:
     return uniform.noisy_circuit(memory_z_base(code, rounds))
 
 
-def circuit_failure_rate(circuit: stim.Circuit, shots: int, decoder: str,
-                         seed: int | None = None) -> float:
-    """회로 자체를 샘플링해 그 detection event를 디코딩한다.
+def circuit_failure_counts(circuit: stim.Circuit, shots: int, decoder: str,
+                           seed: int | None = None) -> FailureCounts:
+    """회로를 샘플링해 detection event를 디코딩하고 두 종류의 실패를 집계한다.
 
     디코더는 detector error model의 행렬 위에서 일하지만, event는 stim이 실제 회로를
     샘플링해서 나온다 — DEM은 디코더의 지도로 쓰이고 잡음원이 아니다. 디코딩된
-    오류에서 예측한 observable 뒤집힘이 샘플된 것과 어긋나면 그 shot은 실패다
-    (참 오류를 몰라도 되는, residual 판정과 동등한 검사).
+    오류에서 예측한 observable 뒤집힘과 샘플된 것을 비교해, 하나라도 다르면 블록
+    실패이고 다른 개수만큼 ``logical_flips``에 더한다 (참 오류를 몰라도 되는,
+    residual 판정과 동등한 검사). 후자는 observable basis(``OBSERVABLE_INCLUDE``에
+    넣은 논리 연산자)에 의존한다.
     """
     dem = circuit.detector_error_model()
     matrices = detector_error_model_to_check_matrices(
         dem, allow_undecomposed_hyperedges=True)   # BP+OSD는 hyperedge를 받는다
+    k = circuit.num_observables
     if matrices.check_matrix.shape[1] == 0:        # 잡음 없음: 실패할 것이 없다
-        return 0.0
+        return FailureCounts(shots, 0, 0, k)
 
     build = DECODERS.get(decoder)
     if build is None:
@@ -165,9 +168,18 @@ def circuit_failure_rate(circuit: stim.Circuit, shots: int, decoder: str,
     detections, observed = sampler.sample(shots, separate_observables=True)
 
     A = matrices.observables_matrix.toarray().astype(np.uint8)
-    failures = 0
+    block_fails = 0
+    logical_flips = 0
     for detection, actual in zip(detections, observed):
         x_hat = decoder_obj.decode(detection.astype(np.uint8))
-        predicted = (A @ x_hat) % 2
-        failures += bool((predicted != actual).any())
-    return failures / shots
+        mismatch = ((A @ x_hat) % 2) != actual
+        block_fails += bool(mismatch.any())
+        logical_flips += int(mismatch.sum())
+    return FailureCounts(shots, block_fails, logical_flips, k)
+
+
+def circuit_failure_rate(circuit: stim.Circuit, shots: int, decoder: str,
+                         seed: int | None = None) -> float:
+    """블록 실패율 -- ``circuit_failure_counts``의 ``block_fails / shots``."""
+    counts = circuit_failure_counts(circuit, shots, decoder, seed)
+    return counts.block_fails / shots
