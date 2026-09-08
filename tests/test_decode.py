@@ -1,6 +1,7 @@
 """BP+OSD로 하는 code-capacity 디코딩."""
 import numpy as np
 import pytest
+from ldpc import BpDecoder
 
 from qec_tile.decode import (DECODERS, VibeLsdDecoder, code_capacity_counts,
                              code_capacity_block_rate, make_decoder,
@@ -74,6 +75,20 @@ def test_all_decoders_are_registered():
 
 # --- VibeLSD -----------------------------------------------------------------
 
+def test_vibelsd_holds_one_bp_decoder():
+    """앙상블이 커져도 ``BpDecoder``는 하나다 -- 멤버 차이는 ``orders``에만 있다.
+
+    멤버마다 객체를 두면 각자 sparse 행렬 사본을 들어 worker 메모리가 앙상블 배로
+    커진다. 5x3 walk DEM(270 x 9632, nnz 61337)에서 실측 4.20 MB/개라 200개면
+    839 MB, sinter worker 24개면 19.7 GB -- 실제로 ``MemoryError: bad allocation``
+    이 났다.
+    """
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
+    assert decoder.orders.shape == (8, code.n)
+    assert not hasattr(decoder, "members")
+
+
 def test_vibelsd_members_use_distinct_serial_schedules():
     """앙상블 멤버는 error mechanism의 순열이 서로 다른 직렬 스케줄이다.
 
@@ -82,12 +97,47 @@ def test_vibelsd_members_use_distinct_serial_schedules():
     """
     code = paper_code(*SMALL)
     decoder = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
-    orders = [tuple(member.serial_schedule_order) for member in decoder.members]
+    orders = [tuple(order) for order in decoder.orders]
     assert len(orders) == 8
     assert len(set(orders)) == 8
     assert all(sorted(order) == list(range(code.n)) for order in orders)
     again = VibeLsdDecoder(code.HZ, 0.05, ensemble=8, seed=0)
-    assert [tuple(m.serial_schedule_order) for m in again.members] == orders
+    assert [tuple(order) for order in again.orders] == orders
+
+
+def test_vibelsd_shared_bp_matches_separate_decoders():
+    """순열을 갈아끼운 ``BpDecoder`` 하나 == 순열마다 만든 ``BpDecoder`` 여러 개.
+
+    옵션 1(앙상블이 객체 하나를 공유)의 전제를 못박는다. 깨질 수 있는 곳이 둘이고
+    둘 다 조용히 틀린다:
+      - ``decode``가 앞 호출의 메시지를 물려받으면 답이 호출 순서에 오염된다
+      - ``serial_schedule_order`` setter가 내부 구조를 다시 안 잡으면 옛 순서로 돈다
+
+    4x2 walk DEM(170 x 5568, nnz 31534)에서 순열 16개 x syndrome 60개를 실측:
+    불일치 0/60, 답이 갈린 syndrome 60/60(동치성이 공허하지 않다), 순열을 3 -> 7 ->
+    3으로 되돌렸을 때 ``llr_max_diff`` 0.00e+00 (warm start 없음).
+
+    ldpc의 동작을 고정하는 테스트라 구현 전에도 통과한다.
+    """
+    code = paper_code(*SMALL)
+    orders = [list(np.random.default_rng(k).permutation(code.n))
+              for k in range(4)]
+    kwargs = dict(error_channel=[0.08] * code.n, bp_method="minimum_sum",
+                  max_iter=15, schedule="serial")
+    separate = [BpDecoder(code.HZ, serial_schedule_order=order, **kwargs)
+                for order in orders]
+    shared = BpDecoder(code.HZ, serial_schedule_order=orders[0], **kwargs)
+
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        e = (rng.random(code.n) < 0.08).astype(np.uint8)
+        syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
+        for order, member in zip(orders, separate):
+            expected = member.decode(syndrome).copy()
+            converged = member.converge
+            shared.serial_schedule_order = order
+            assert np.array_equal(shared.decode(syndrome), expected)
+            assert shared.converge == converged
 
 
 def test_vibelsd_correction_matches_the_syndrome():

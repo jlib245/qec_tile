@@ -100,25 +100,30 @@ class VibeLsdDecoder:
         if channel.ndim == 0:
             channel = np.full(H.shape[1], float(channel))
         rng = np.random.default_rng(seed)
-        self.members = [
-            BpDecoder(H, error_channel=list(channel), bp_method="minimum_sum",
-                      max_iter=max_iter, ms_scaling_factor=ms_scaling_factor,
-                      schedule="serial",
-                      serial_schedule_order=list(rng.permutation(H.shape[1])))
-            for _ in range(ensemble)]
+        # 멤버를 가르는 것은 순열뿐이라 BpDecoder는 하나로 족하다. 멤버마다 객체를
+        # 두면 각자 sparse 사본을 들어 worker 메모리가 앙상블 배로 커진다.
+        self.orders = np.array([rng.permutation(H.shape[1])
+                                for _ in range(ensemble)], dtype=np.int32)
+        self.bp = BpDecoder(H, error_channel=list(channel),
+                            bp_method="minimum_sum", max_iter=max_iter,
+                            ms_scaling_factor=ms_scaling_factor,
+                            schedule="serial",
+                            # 생성자는 list만 받는다 (setter는 ndarray도 받는다)
+                            serial_schedule_order=self.orders[0].tolist())
         self.lsd = LsdDecoder(H, lsd_order=lsd_order)
         self.converged = converged
         self.log_weight = np.log((1 - channel) / channel)   # 열별 -log 우도
 
     def decode(self, syndrome):
         best, best_weight, hits, llrs = None, np.inf, 0, []
-        for member in self.members:
-            candidate = member.decode(syndrome)
-            llr = np.asarray(member.log_prob_ratios, dtype=float)
+        for order in self.orders:
+            self.bp.serial_schedule_order = order   # decode보다 먼저: 뒤면 한 칸 밀린다
+            candidate = self.bp.decode(syndrome)
+            llr = np.asarray(self.bp.log_prob_ratios, dtype=float)
             norm = np.linalg.norm(llr)
             if norm > 0:
                 llrs.append(llr / norm)
-            if member.converge:
+            if self.bp.converge:
                 hits += 1
                 weight = float(self.log_weight @ candidate)
                 if weight < best_weight:
