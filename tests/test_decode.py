@@ -140,6 +140,38 @@ def test_vibelsd_shared_bp_matches_separate_decoders():
             assert shared.converge == converged
 
 
+def test_vibelsd_budget_matches_running_every_member_fully():
+    """예산 깎기 == L개를 full depth로 돌려 iter 최소 M개를 고른 것.
+
+    예산이 너무 세게 조여 나중에 더 빨리 수렴할 멤버가 잘리면 갈린다 -- 에러 없이
+    후보만 나빠지는 실패다. 근거: 이미 M개가 c <= t에 수렴해 있으면 t 안에 수렴
+    못 하는 멤버는 c > t라 상위 M개에 못 든다.
+    """
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(code.HZ, 0.08, ensemble=16, converged=3, seed=2)
+    rng = np.random.default_rng(3)
+    for _ in range(30):
+        e = (rng.random(code.n) < 0.08).astype(np.uint8)
+        syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
+
+        naive = []                       # 예산 없이 전부 끝까지
+        for order in decoder.orders:
+            decoder.bp.serial_schedule_order = order
+            decoder.bp.max_iter = decoder.max_iter
+            candidate = decoder.bp.decode(syndrome)
+            if decoder.bp.converge:
+                naive.append((decoder.bp.iter,
+                              float(decoder.log_weight @ candidate),
+                              candidate.copy()))
+        naive.sort(key=lambda c: c[0])
+        del naive[decoder.converged:]
+
+        got = decoder.decode(syndrome)
+        if naive:
+            assert np.array_equal(got, min(naive, key=lambda c: c[1])[2])
+        assert (((code.HZ @ got) % 2) == syndrome).all()
+
+
 def test_vibelsd_correction_matches_the_syndrome():
     """무엇을 돌려주든 ``H @ e_hat == s`` -- 수렴한 후보든 LSD fallback이든."""
     code = paper_code(*SMALL)

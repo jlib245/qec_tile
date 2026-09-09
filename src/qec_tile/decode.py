@@ -111,27 +111,40 @@ class VibeLsdDecoder:
                             # 생성자는 list만 받는다 (setter는 ndarray도 받는다)
                             serial_schedule_order=self.orders[0].tolist())
         self.lsd = LsdDecoder(H, lsd_order=lsd_order)
+        self.max_iter = max_iter
         self.converged = converged
         self.log_weight = np.log((1 - channel) / channel)   # 열별 -log 우도
 
     def decode(self, syndrome):
-        best, best_weight, hits, llrs = None, np.inf, 0, []
+        """논문 III.4.2. 후보는 수렴 iteration이 가장 작은 ``converged``개다.
+
+        논문은 L개를 동시에 돌려 M번째가 수렴하면 나머지를 끊는다. 순차로 돌되
+        예산을 그 M번째 값으로 깎으면 같은 집합이 나온다 -- 예산 안에 수렴 못 하는
+        멤버는 어차피 상위 M개가 아니다. break가 없는 것은 뒤쪽에 더 빨리 수렴하는
+        멤버가 있을 수 있어서다.
+        """
+        budget = self.max_iter
+        found, llrs = [], []             # found: (iter, weight, correction)
         for order in self.orders:
-            self.bp.serial_schedule_order = order   # decode보다 먼저: 뒤면 한 칸 밀린다
+            self.bp.serial_schedule_order = order   # 둘 다 decode보다 먼저다
+            self.bp.max_iter = budget
             candidate = self.bp.decode(syndrome)
             llr = np.asarray(self.bp.log_prob_ratios, dtype=float)
             norm = np.linalg.norm(llr)
             if norm > 0:
                 llrs.append(llr / norm)
             if self.bp.converge:
-                hits += 1
-                weight = float(self.log_weight @ candidate)
-                if weight < best_weight:
-                    best, best_weight = candidate.copy(), weight
-                if hits >= self.converged:
-                    break
-        if best is not None:
-            return best
+                found.append((self.bp.iter,
+                              float(self.log_weight @ candidate),
+                              candidate.copy()))
+                found.sort(key=lambda c: c[0])
+                del found[self.converged:]
+                if len(found) == self.converged:
+                    budget = found[-1][0]           # M번째로 빠른 수렴
+        if found:
+            return min(found, key=lambda c: c[1])[2]    # prior 우도 최소
+        # 수렴이 0개라 예산이 한 번도 안 줄었다 -- L개 전부가 full max_iter로 돌았고
+        # 논문 step 5의 (1/L) Σ LLR_i / ‖LLR_i‖가 그대로 성립한다.
         return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
 
 
