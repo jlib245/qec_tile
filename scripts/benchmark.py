@@ -174,7 +174,7 @@ def sweep_rounds(args) -> set[int]:
 
 
 def resolve_max_iter(decoder: str, explicit: int | None,
-                     rounds: set[int]) -> int | None:
+                     rounds: set[int], workers: int | None) -> int | None:
     """--max-iter 해석. None이면 디코더 자신의 기본값을 쓴다.
 
     directional 논문은 vibelsd_200 설정을 "15 min-sum iterations per round"로
@@ -183,7 +183,13 @@ def resolve_max_iter(decoder: str, explicit: int | None,
 
     sinter는 모든 task에 디코더 하나를 쓰므로 값이 하나여야 한다. 크기마다
     round가 다르면 정할 수 없어 거부한다.
+
+    단일 프로세스 경로(``workers`` 없음)는 max_iter를 아직 안 쓴다. 거기서 값을
+    정하면 파일명에만 ``_iter60``이 붙고 실제로는 디코더 기본값으로 돌아
+    CSV가 거짓말을 한다.
     """
+    if workers is None:
+        return None
     if explicit is not None:
         return explicit
     if decoder != "vibelsd_200":
@@ -254,7 +260,7 @@ def main():
                  "(needs --workers)")
     try:
         args.max_iter = resolve_max_iter(args.decoder, args.max_iter,
-                                         sweep_rounds(args))
+                                         sweep_rounds(args), args.workers)
     except ValueError as exc:
         ap.error(str(exc))
     if args.seed is None:
