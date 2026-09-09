@@ -19,10 +19,10 @@ from ldpc.sinter_decoders import SinterLsdDecoder
 from .decode import FailureCounts, VibeLsdDecoder
 
 
-def _osd(osd_method: str, osd_order: int):
+def _osd(osd_method: str, osd_order: int, max_iter: int = 50):
     # decode.make_decoder와 맞춰둔다 — serial과 parallel 결과를 견줄 수 있게.
     return lambda: SinterBpOsdDecoder(
-        bp_method="minimum_sum", max_iter=50, ms_scaling_factor=1.0,
+        bp_method="minimum_sum", max_iter=max_iter, ms_scaling_factor=1.0,
         osd_method=osd_method, osd_order=osd_order)
 
 
@@ -61,20 +61,22 @@ class SinterVibeLsdDecoder(sinter.Decoder):
 # 짝을 맞췄고 bplsd_cs7만 빠졌다 — SinterLsdDecoder에는 lsd_method 손잡이가
 # 없어서 combination sweep LSD는 serial 전용으로 남는다.
 SINTER_DECODERS = {
-    "bposd_cs7": _osd("osd_cs", 7),
-    "bposd_0": _osd("osd_0", 0),
-    "bplsd_0": lambda: SinterLsdDecoder(          # Hillmann et al. 설정
-        bp_method="minimum_sum", max_iter=30,
+    "bposd_cs7": lambda max_iter=50: _osd("osd_cs", 7, max_iter)(),
+    "bposd_0": lambda max_iter=50: _osd("osd_0", 0, max_iter)(),
+    "bplsd_0": lambda max_iter=30: SinterLsdDecoder(   # Hillmann et al. 설정
+        bp_method="minimum_sum", max_iter=max_iter,
         ms_scaling_factor=0.625, lsd_order=0),
-    "vibelsd_32": lambda: SinterVibeLsdDecoder(ensemble=32, max_iter=20),
-    "vibelsd_200": lambda: SinterVibeLsdDecoder(ensemble=200, max_iter=15),
+    "vibelsd_32": lambda max_iter=20: SinterVibeLsdDecoder(
+        ensemble=32, max_iter=max_iter),
+    "vibelsd_200": lambda max_iter=15: SinterVibeLsdDecoder(
+        ensemble=200, max_iter=max_iter),
 }
 
 
 def collect(circuits: dict[object, stim.Circuit], decoder: str,
             max_shots: int, max_errors: int | None = None,
-            workers: int = 8,
-            progress: bool = True) -> dict[object, FailureCounts]:
+            workers: int = 8, progress: bool = True,
+            max_iter: int | None = None) -> dict[object, FailureCounts]:
     """모든 circuit을 병렬로 디코딩 -> ``{key: FailureCounts}``.
 
     sinter의 ``count_observable_error_combos``가 shot마다 뒤집힌 observable 조합을
@@ -110,7 +112,9 @@ def collect(circuits: dict[object, stim.Circuit], decoder: str,
         num_workers=workers,
         tasks=tasks,
         decoders=[decoder],
-        custom_decoders={decoder: build()},
+        # None이면 인자를 아예 안 넘긴다 -- 항목마다 다른 기본값이 살아야 한다
+        custom_decoders={decoder: build() if max_iter is None
+                         else build(max_iter)},
         max_shots=max_shots,
         max_errors=max_errors,
         count_observable_error_combos=True,

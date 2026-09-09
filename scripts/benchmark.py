@@ -137,7 +137,8 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
     if not circuits:
         return
     stats = collect(circuits, args.decoder, max_shots=args.shots,
-                    max_errors=args.max_errors, workers=args.workers)
+                    max_errors=args.max_errors, workers=args.workers,
+                    max_iter=args.max_iter)
     for (label, p), counts in sorted(stats.items()):
         code, rounds = codes[label]
         rate = counts.block_fails / counts.shots
@@ -161,6 +162,36 @@ def already_done(path: str) -> set[tuple]:
     with open(path, newline="") as f:
         return {(row["L"], float(row["p"]))
                 for row in csv.DictReader(f)}
+
+
+def sweep_rounds(args) -> set[int]:
+    """이 sweep이 쓸 round 수들. iter_codes의 기본값 규칙과 같아야 한다."""
+    if args.rounds:
+        return {args.rounds}
+    if args.word:
+        return {max(M, N) for M, N in args.sizes}
+    return set(args.Ls)
+
+
+def resolve_max_iter(decoder: str, explicit: int | None,
+                     rounds: set[int]) -> int | None:
+    """--max-iter 해석. None이면 디코더 자신의 기본값을 쓴다.
+
+    directional 논문은 vibelsd_200 설정을 "15 min-sum iterations per round"로
+    적었다 -- rounds에 비례한다. VibeLSD 논문(앙상블 32, 20회)을 따르는
+    vibelsd_32에는 해당하지 않으므로 건드리지 않는다.
+
+    sinter는 모든 task에 디코더 하나를 쓰므로 값이 하나여야 한다. 크기마다
+    round가 다르면 정할 수 없어 거부한다.
+    """
+    if explicit is not None:
+        return explicit
+    if decoder != "vibelsd_200":
+        return None
+    if len(rounds) != 1:
+        raise ValueError(f"--rounds가 크기마다 다르다 ({sorted(rounds)}). "
+                         f"--rounds나 --max-iter를 명시하라")
+    return 15 * next(iter(rounds))
 
 
 def main():
@@ -194,6 +225,8 @@ def main():
                          "bare --workers uses QEC_TILE_WORKERS from .env")
     ap.add_argument("--max-errors", type=int, default=None,
                     help="stop a point after this many errors (needs --workers)")
+    ap.add_argument("--max-iter", type=int, default=None,
+                    help="BP iterations; vibelsd_200 defaults to 15 per round")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if args.word and not args.sizes:
@@ -216,6 +249,14 @@ def main():
     if args.workers is not None and args.seed is not None:
         ap.error("--seed has no effect with --workers "
                  "(sinter's scheduling is nondeterministic)")
+    if args.max_iter is not None and args.workers is None:
+        ap.error("--max-iter is only wired through the sinter path "
+                 "(needs --workers)")
+    try:
+        args.max_iter = resolve_max_iter(args.decoder, args.max_iter,
+                                         sweep_rounds(args))
+    except ValueError as exc:
+        ap.error(str(exc))
     if args.seed is None:
         args.seed = 0                          # serial 기본값
 
@@ -223,8 +264,9 @@ def main():
         stem = args.word if args.word else args.tile
         if args.routing == "optimised":
             stem += "_opt"
+        suffix = "" if args.max_iter is None else f"_iter{args.max_iter}"
         args.out = (f"data/{stem}_{args.decoder}_{args.noise}"
-                    f"_shots{args.shots}_seed{args.seed}.csv")
+                    f"_shots{args.shots}{suffix}_seed{args.seed}.csv")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     done = already_done(args.out)
     is_new = (not os.path.exists(args.out)
