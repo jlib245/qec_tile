@@ -115,8 +115,8 @@ class VibeLsdDecoder:
         self.converged = converged
         self.log_weight = np.log((1 - channel) / channel)   # 열별 -log 우도
 
-    def decode(self, syndrome):
-        """논문 III.4.2. 후보는 수렴 iteration이 가장 작은 ``converged``개다.
+    def _collect(self, syndrome):
+        """앙상블을 훑어 ``(found, llrs)``. found는 수렴 iteration 최소 M개다.
 
         논문은 L개를 동시에 돌려 M번째가 수렴하면 나머지를 끊는다. 순차로 돌되
         예산을 그 M번째 값으로 깎으면 같은 집합이 나온다 -- 예산 안에 수렴 못 하는
@@ -141,11 +141,63 @@ class VibeLsdDecoder:
                 del found[self.converged:]
                 if len(found) == self.converged:
                     budget = found[-1][0]           # M번째로 빠른 수렴
+        return found, llrs
+
+    def decode(self, syndrome):
+        """논문 III.4.2. 수렴 후보 중 prior 우도가 가장 큰(가장 가벼운) 것."""
+        found, llrs = self._collect(syndrome)
         if found:
-            return min(found, key=lambda c: c[1])[2]    # prior 우도 최소
+            return min(found, key=lambda c: c[1])[2]
         # 수렴이 0개라 예산이 한 번도 안 줄었다 -- L개 전부가 full max_iter로 돌았고
         # 논문 step 5의 (1/L) Σ LLR_i / ‖LLR_i‖가 그대로 성립한다.
         return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
+
+
+def _log_mass(weights) -> float:
+    """``log Σ exp(-weight)``. weight가 크면 exp(-weight)가 0으로 죽으므로
+    최솟값을 빼고 더한다 (logsumexp)."""
+    floor = min(weights)
+    return -floor + float(np.log(sum(np.exp(-(w - floor)) for w in weights)))
+
+
+class VibeCosetDecoder(VibeLsdDecoder):
+    """수렴 후보를 logical coset으로 묶어 확률을 합산한다 (논문 밖 변형).
+
+    ``VibeLsdDecoder``는 후보 중 가장 가벼운 하나를 고른다. 그것은 coset 확률
+    ``Σ_{e ∈ coset} P(e)``를 최댓값 한 항으로 근사하는 셈이라, 같은 coset에 후보가
+    여럿이면 그 coset을 과소평가하고, 무게가 같은 후보가 서로 다른 coset에 있으면
+    임의로 고른다. 여기서는 합을 직접 계산한다.
+
+    후보 수집은 부모와 동일하다 -- 같은 M개를 놓고 최종 선택 규칙만 다르므로
+    ``vibelsd_200``과 직접 비교된다.
+    """
+
+    def __init__(self, H, channel, observables, **kwargs):
+        super().__init__(H, channel, **kwargs)
+        # 두 후보가 같은 답인지 가르는 유일한 기준: O @ e가 같으면 stabilizer
+        # 차이(같은 답), 다르면 logical 차이(다른 답)다. sinter가 예측을 만들 때
+        # 쓰는 바로 그 행렬이라 여기서 나눈 class가 실제 논리 결과와 일치한다.
+        self.observables = np.asarray(observables, dtype=np.uint8)
+
+    def decode(self, syndrome):
+        """coset 확률 합이 최대인 class의 대표를 돌려준다."""
+        found, llrs = self._collect(syndrome)
+        if not found:
+            return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
+
+        # 서로 다른 순열이 같은 벡터로 수렴하는 일이 흔하다. 확률 합은 서로 다른
+        # 오류 패턴에 대한 합이므로, 중복을 세면 그 coset이 부풀려진다.
+        unique = {}
+        for _, weight, correction in found:
+            unique[correction.tobytes()] = (weight, correction)
+
+        cosets = {}                      # class -> ([weight, ...], 대표 벡터)
+        for weight, correction in unique.values():
+            label = ((self.observables @ correction) % 2).tobytes()
+            cosets.setdefault(label, ([], correction))[0].append(weight)
+
+        return max(cosets.values(), key=lambda c: _log_mass(c[0]))[1]
+
 
 
 DECODERS = {

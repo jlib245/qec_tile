@@ -16,7 +16,7 @@ from ldpc import SinterBpOsdDecoder
 from ldpc.ckt_noise.dem_matrices import detector_error_model_to_check_matrices
 from ldpc.sinter_decoders import SinterLsdDecoder
 
-from .decode import FailureCounts, VibeLsdDecoder
+from .decode import FailureCounts, VibeCosetDecoder, VibeLsdDecoder
 
 
 def _osd(osd_method: str, osd_order: int, max_iter: int = 50):
@@ -33,7 +33,8 @@ class SinterVibeLsdDecoder(sinter.Decoder):
     DEM은 worker가 파일로 받으므로 행렬과 앙상블은 여기서 짓고, shot은 b8로 읽고 쓴다.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, coset: bool = False, **kwargs):
+        self.coset = coset                         # coset 합산 변형을 쓸지
         self.kwargs = kwargs                       # VibeLsdDecoder 손잡이 그대로
 
     def decode_via_files(self, *, num_shots, num_dets, num_obs, dem_path,
@@ -42,9 +43,14 @@ class SinterVibeLsdDecoder(sinter.Decoder):
         dem = stim.DetectorErrorModel.from_file(dem_path)
         matrices = detector_error_model_to_check_matrices(
             dem, allow_undecomposed_hyperedges=True)
-        decoder = VibeLsdDecoder(matrices.check_matrix.toarray(),
-                                 matrices.priors, **self.kwargs)
         observables = matrices.observables_matrix.toarray().astype(np.uint8)
+        if self.coset:                             # 디코딩에도 observable을 쓴다
+            decoder = VibeCosetDecoder(matrices.check_matrix.toarray(),
+                                       matrices.priors, observables,
+                                       **self.kwargs)
+        else:
+            decoder = VibeLsdDecoder(matrices.check_matrix.toarray(),
+                                     matrices.priors, **self.kwargs)
         shots = stim.read_shot_data_file(path=dets_b8_in_path, format="b8",
                                          num_detectors=num_dets)
         predictions = np.zeros((num_shots, num_obs), dtype=bool)
@@ -70,6 +76,9 @@ SINTER_DECODERS = {
         ensemble=32, max_iter=max_iter),
     "vibelsd_200": lambda max_iter=15: SinterVibeLsdDecoder(
         ensemble=200, max_iter=max_iter),
+    # vibelsd_200과 ensemble/max_iter/converged가 같다 -- 최종 선택 규칙만 다른 대조군.
+    "vibecoset_200": lambda max_iter=15: SinterVibeLsdDecoder(
+        coset=True, ensemble=200, max_iter=max_iter),
 }
 
 

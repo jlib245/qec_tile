@@ -43,7 +43,7 @@ from qec_tile.decode import (DECODERS, code_capacity_counts, failure_counts)
 from qec_tile.noise_model import NoiseModel
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile import config
-from qec_tile.sinter_sampling import collect
+from qec_tile.sinter_sampling import SINTER_DECODERS, collect
 from qec_tile.tile import paper_code
 from qec_tile.directional import build_directional_code
 from qec_tile.walk2 import optimise_routing, walk_memory_z_base
@@ -202,7 +202,8 @@ def resolve_max_iter(decoder: str, explicit: int | None,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--decoder", required=True, choices=sorted(DECODERS))
+    ap.add_argument("--decoder", required=True,
+                    choices=sorted(set(DECODERS) | set(SINTER_DECODERS)))
     ap.add_argument("--noise", required=True,
                     choices=["capacity", "pheno", "circuit", "si1000",
                              "uniform"])
@@ -255,6 +256,8 @@ def main():
     if args.workers is not None and args.seed is not None:
         ap.error("--seed has no effect with --workers "
                  "(sinter's scheduling is nondeterministic)")
+    if args.decoder not in DECODERS and args.workers is None:
+        ap.error(f"--decoder {args.decoder} is sinter-only (needs --workers)")
     if args.max_iter is not None and args.workers is None:
         ap.error("--max-iter is only wired through the sinter path "
                  "(needs --workers)")
