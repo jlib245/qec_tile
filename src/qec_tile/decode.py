@@ -205,6 +205,9 @@ DECODERS = {
     "vibelsd_32": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=32, max_iter=20),
     "vibelsd_200": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
                                                 max_iter=15),
+    # M을 키우면 coset 합산이 값을 하는지 보는 대조군 (M=5에서 포화되는지 확인).
+    "vibelsd_200_m20": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
+                                                    converged=20, max_iter=15),
     # BB code 관례 (Bravyi et al.): OSD combination sweep, order 7.
     "bposd_cs7": lambda H, ch: make_decoder(H, ch, osd_method="osd_cs",
                                             osd_order=7),

@@ -164,6 +164,13 @@ def already_done(path: str) -> set[tuple]:
                 for row in csv.DictReader(f)}
 
 
+# directional 논문(arXiv:2606.19482)이 "15 min-sum iterations per round"로 적은
+# 설정을 쓰는 디코더들. vibelsd_32는 VibeLSD 논문(20회, round와 무관)을 따르므로
+# 여기 없다.
+PER_ROUND_ITER = {"vibelsd_200", "vibecoset_200",
+                  "vibelsd_200_m20", "vibecoset_200_m20"}
+
+
 def sweep_rounds(args) -> set[int]:
     """이 sweep이 쓸 round 수들. iter_codes의 기본값 규칙과 같아야 한다."""
     if args.rounds:
@@ -177,9 +184,9 @@ def resolve_max_iter(decoder: str, explicit: int | None,
                      rounds: set[int], workers: int | None) -> int | None:
     """--max-iter 해석. None이면 디코더 자신의 기본값을 쓴다.
 
-    directional 논문은 vibelsd_200 설정을 "15 min-sum iterations per round"로
-    적었다 -- rounds에 비례한다. VibeLSD 논문(앙상블 32, 20회)을 따르는
-    vibelsd_32에는 해당하지 않으므로 건드리지 않는다.
+    directional 논문은 "15 min-sum iterations per round"로 적었다 -- rounds에
+    비례한다. 해당하는 디코더는 ``PER_ROUND_ITER``에 있고, VibeLSD 논문(앙상블 32,
+    20회)을 따르는 vibelsd_32는 거기 없으므로 건드리지 않는다.
 
     sinter는 모든 task에 디코더 하나를 쓰므로 값이 하나여야 한다. 크기마다
     round가 다르면 정할 수 없어 거부한다.
@@ -192,7 +199,7 @@ def resolve_max_iter(decoder: str, explicit: int | None,
         return None
     if explicit is not None:
         return explicit
-    if decoder != "vibelsd_200":
+    if decoder not in PER_ROUND_ITER:
         return None
     if len(rounds) != 1:
         raise ValueError(f"--rounds가 크기마다 다르다 ({sorted(rounds)}). "
