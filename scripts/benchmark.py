@@ -168,7 +168,9 @@ def already_done(path: str) -> set[tuple]:
 # 설정을 쓰는 디코더들. vibelsd_32는 VibeLSD 논문(20회, round와 무관)을 따르므로
 # 여기 없다.
 PER_ROUND_ITER = {"vibelsd_200", "vibecoset_200",
-                  "vibelsd_200_m20", "vibecoset_200_m20"}
+                  "vibelsd_200_m20", "vibecoset_200_m20",
+                  "vibelsd_200_m30", "vibecoset_200_m30",
+                  "vibelsd_200_m50", "vibecoset_200_m50"}
 
 
 def sweep_rounds(args) -> set[int]:

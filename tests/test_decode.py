@@ -70,7 +70,8 @@ def test_decoder_is_required():
 
 def test_all_decoders_are_registered():
     assert set(DECODERS) == {"bposd_cs7", "bposd_0", "bplsd_0", "bplsd_cs7",
-                             "vibelsd_32", "vibelsd_200", "vibelsd_200_m20"}
+                             "vibelsd_32", "vibelsd_200", "vibelsd_200_m20",
+                             "vibelsd_200_m30", "vibelsd_200_m50"}
 
 
 # --- VibeLSD -----------------------------------------------------------------

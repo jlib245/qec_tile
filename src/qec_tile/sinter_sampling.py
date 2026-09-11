@@ -82,8 +82,16 @@ SINTER_DECODERS = {
     # M=20: coset 합산이 후보를 더 모으면 값을 하는지 보는 대조 쌍.
     "vibelsd_200_m20": lambda max_iter=15: SinterVibeLsdDecoder(
         ensemble=200, converged=20, max_iter=max_iter),
+    "vibelsd_200_m30": lambda max_iter=15: SinterVibeLsdDecoder(
+            ensemble=200, converged=30, max_iter=max_iter),
+    "vibelsd_200_m50": lambda max_iter=15: SinterVibeLsdDecoder(
+            ensemble=200, converged=50, max_iter=max_iter),
     "vibecoset_200_m20": lambda max_iter=15: SinterVibeLsdDecoder(
         coset=True, ensemble=200, converged=20, max_iter=max_iter),
+    "vibecoset_200_m30": lambda max_iter=15: SinterVibeLsdDecoder(
+            coset=True, ensemble=200, converged=30, max_iter=max_iter),
+    "vibecoset_200_m50": lambda max_iter=15: SinterVibeLsdDecoder(
+            coset=True, ensemble=200, converged=50, max_iter=max_iter),
 }
 
 

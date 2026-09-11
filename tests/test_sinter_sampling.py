@@ -49,7 +49,7 @@ def test_registry_mirrors_serial_except_lsd_cs():
     """
     from qec_tile.decode import DECODERS
     from qec_tile.sinter_sampling import SINTER_DECODERS
-    assert (set(SINTER_DECODERS) - {"vibecoset_200", "vibecoset_200_m20"}
+    assert (set(SINTER_DECODERS) - {"vibecoset_200", "vibecoset_200_m20", "vibecoset_200_m30", "vibecoset_200_m50"}
             == set(DECODERS) - {"bplsd_cs7"})
 
 
