@@ -43,6 +43,7 @@ from qec_tile.decode import (DECODERS, code_capacity_counts, failure_counts)
 from qec_tile.noise_model import NoiseModel
 from qec_tile.pheno import spacetime_channel, spacetime_matrices
 from qec_tile import config
+from qec_tile.parallel_sampling import parallel_failure_counts
 from qec_tile.sinter_sampling import SINTER_DECODERS, collect
 from qec_tile.tile import paper_code
 from qec_tile.directional import build_directional_code
@@ -136,16 +137,25 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
                 circuits[(label, p)] = NoiseModel.SI1000(p).noisy_circuit(base)
     if not circuits:
         return
-    stats = collect(circuits, args.decoder, max_shots=args.shots,
-                    max_errors=args.max_errors, workers=args.workers,
-                    max_iter=args.max_iter)
+    if args.reproducible:              # 시드로 재현되는 경로: 회로마다 순차로
+        stats = {key: parallel_failure_counts(
+                     circuit, args.shots, args.decoder, seed=args.seed,
+                     workers=args.workers, chunk=args.chunk,
+                     max_errors=args.max_errors, max_iter=args.max_iter)
+                 for key, circuit in circuits.items()}
+    else:
+        stats = collect(circuits, args.decoder, max_shots=args.shots,
+                        max_errors=args.max_errors, workers=args.workers,
+                        max_iter=args.max_iter)
     for (label, p), counts in sorted(stats.items()):
         code, rounds = codes[label]
         rate = counts.block_fails / counts.shots
         writer.writerow(dict(
             tile=(args.word or args.tile), decoder=args.decoder,
             noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
-            p=p, meas_error="", seed="", shots=counts.shots,
+            p=p, meas_error="",
+            seed=(args.seed if args.reproducible else ""),
+            shots=counts.shots,
             fails=counts.block_fails, flips=counts.logical_flips,
             rate=rate, sec=""))
         csv_file.flush()
@@ -243,6 +253,8 @@ def main():
                     help="stop a point after this many errors (needs --workers)")
     ap.add_argument("--max-iter", type=int, default=None,
                     help="BP iterations; vibelsd_200 defaults to 15 per round")
+    ap.add_argument("--chunk", type=int, default=100,
+                    help="shots per chunk in the reproducible path")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if args.word and not args.sizes:
@@ -262,9 +274,6 @@ def main():
         ap.error("--workers must be a positive integer")
     if args.max_errors is not None and args.workers is None:
         ap.error("--max-errors requires --workers")
-    if args.workers is not None and args.seed is not None:
-        ap.error("--seed has no effect with --workers "
-                 "(sinter's scheduling is nondeterministic)")
     if args.decoder not in DECODERS and args.workers is None:
         ap.error(f"--decoder {args.decoder} is sinter-only (needs --workers)")
     if args.max_iter is not None and args.workers is None:
@@ -275,6 +284,8 @@ def main():
                                          sweep_rounds(args), args.workers)
     except ValueError as exc:
         ap.error(str(exc))
+    # --workers + --seed: sinter 대신 재현 가능한 병렬 경로 (parallel_sampling)
+    args.reproducible = args.workers is not None and args.seed is not None
     if args.seed is None:
         args.seed = 0                          # serial 기본값
 
@@ -283,8 +294,9 @@ def main():
         if args.routing == "optimised":
             stem += "_opt"
         suffix = "" if args.max_iter is None else f"_iter{args.max_iter}"
+        marker = "_rep" if args.reproducible else ""   # sinter 결과와 섞이지 않게
         args.out = (f"data/{stem}_{args.decoder}_{args.noise}"
-                    f"_shots{args.shots}{suffix}_seed{args.seed}.csv")
+                    f"_shots{args.shots}{suffix}{marker}_seed{args.seed}.csv")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     done = already_done(args.out)
     is_new = (not os.path.exists(args.out)

@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 from ldpc import BpDecoder
+from scipy.sparse import csr_matrix
 
 from qec_tile.decode import (DECODERS, VibeLsdDecoder, code_capacity_counts,
                              code_capacity_block_rate, make_decoder,
@@ -171,6 +172,21 @@ def test_vibelsd_budget_matches_running_every_member_fully():
         if naive:
             assert np.array_equal(got, min(naive, key=lambda c: c[1])[2])
         assert (((code.HZ @ got) % 2) == syndrome).all()
+
+
+def test_vibelsd_accepts_a_sparse_check_matrix():
+    """DEM 행렬은 scipy sparse로 온다 -- 밀집화는 디코더가 맡는다.
+
+    parallel_sampling과 circuit_failure_counts는 matrices.check_matrix를 그대로
+    넘긴다 (ldpc의 BpOsdDecoder가 sparse를 받으므로). np.asarray로 바로 받으면
+    ``TypeError: int() argument must be ... not 'csc_matrix'``가 난다.
+    """
+    code = paper_code(*SMALL)
+    decoder = VibeLsdDecoder(csr_matrix(code.HZ), 0.05, ensemble=4, seed=0)
+    e = np.zeros(code.n, dtype=np.uint8)
+    e[3] = 1
+    syndrome = ((code.HZ @ e) % 2).astype(np.uint8)
+    assert (((code.HZ @ decoder.decode(syndrome)) % 2) == syndrome).all()
 
 
 def test_vibelsd_correction_matches_the_syndrome():

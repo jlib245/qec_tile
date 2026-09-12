@@ -19,6 +19,7 @@ from typing import NamedTuple
 import numpy as np
 from ldpc import BpDecoder, BpLsdDecoder, BpOsdDecoder
 from ldpc.lsd_decoder import LsdDecoder
+from scipy.sparse import issparse
 
 
 def _prior(channel):
@@ -95,6 +96,8 @@ class VibeLsdDecoder:
     def __init__(self, H, channel, *, ensemble: int = 32, converged: int = 5,
                  max_iter: int = 20, ms_scaling_factor: float = 1.0,
                  lsd_order: int = 0, seed: int = 0):
+        if issparse(H):                # DEM 행렬은 sparse로 온다 (ldpc가 받으므로
+            H = H.toarray()            # 호출부들이 펴지 않고 그대로 넘긴다)
         H = np.asarray(H, dtype=np.uint8)
         channel = np.asarray(channel, dtype=float)
         if channel.ndim == 0:
@@ -200,29 +203,48 @@ class VibeCosetDecoder(VibeLsdDecoder):
 
 
 
+# observable 행렬이 있어야 만들 수 있는 디코더들. coset 판별에 O @ e가 필요한데
+# DECODERS의 build(H, channel) 규약에는 그 자리가 없어 따로 둔다. 섞어두면 기존
+# 호출부가 coset 항목을 만났을 때 observables가 없는 채로 넘어가 조용히 깨진다.
+OBSERVABLE_DECODERS = {
+    "vibecoset_200": lambda H, ch, obs, max_iter=15: VibeCosetDecoder(
+        H, ch, obs, ensemble=200, max_iter=max_iter),
+    "vibecoset_200_m20": lambda H, ch, obs, max_iter=15: VibeCosetDecoder(
+        H, ch, obs, ensemble=200, converged=20, max_iter=max_iter),
+    "vibecoset_200_m30": lambda H, ch, obs, max_iter=15: VibeCosetDecoder(
+        H, ch, obs, ensemble=200, converged=30, max_iter=max_iter),
+    "vibecoset_200_m50": lambda H, ch, obs, max_iter=15: VibeCosetDecoder(
+        H, ch, obs, ensemble=200, converged=50, max_iter=max_iter),
+}
+
+
 DECODERS = {
     # VibeLSD: vibe 논문 기본(앙상블 32, 20회)과 directional 논문이 쓴 설정(200, 15회).
-    "vibelsd_32": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=32, max_iter=20),
-    "vibelsd_200": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
-                                                max_iter=15),
+    # max_iter 기본값은 make_decoder/make_lsd_decoder와 맞춰 적어둔 것이다 -- 두
+    # 곳이 어긋나면 조용히 설정이 바뀐다.
+    "vibelsd_32": lambda H, ch, max_iter=20: VibeLsdDecoder(
+        H, ch, ensemble=32, max_iter=max_iter),
+    "vibelsd_200": lambda H, ch, max_iter=15: VibeLsdDecoder(
+        H, ch, ensemble=200, max_iter=max_iter),
     # M을 키우면 coset 합산이 값을 하는지 보는 대조군 (M=5에서 포화되는지 확인).
-    "vibelsd_200_m20": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
-                                                    converged=20, max_iter=15),
-    "vibelsd_200_m30": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
-                                                    converged=30, max_iter=15),
-    "vibelsd_200_m50": lambda H, ch: VibeLsdDecoder(H, ch, ensemble=200,
-                                                    converged=50, max_iter=15),
+    "vibelsd_200_m20": lambda H, ch, max_iter=15: VibeLsdDecoder(
+        H, ch, ensemble=200, converged=20, max_iter=max_iter),
+    "vibelsd_200_m30": lambda H, ch, max_iter=15: VibeLsdDecoder(
+        H, ch, ensemble=200, converged=30, max_iter=max_iter),
+    "vibelsd_200_m50": lambda H, ch, max_iter=15: VibeLsdDecoder(
+        H, ch, ensemble=200, converged=50, max_iter=max_iter),
     # BB code 관례 (Bravyi et al.): OSD combination sweep, order 7.
-    "bposd_cs7": lambda H, ch: make_decoder(H, ch, osd_method="osd_cs",
-                                            osd_order=7),
+    "bposd_cs7": lambda H, ch, max_iter=50: make_decoder(
+        H, ch, osd_method="osd_cs", osd_order=7, max_iter=max_iter),
     # 가장 싼 OSD: order-0 소거만, combination sweep 없음.
-    "bposd_0": lambda H, ch: make_decoder(H, ch, osd_method="osd_0",
-                                          osd_order=0),
+    "bposd_0": lambda H, ch, max_iter=50: make_decoder(
+        H, ch, osd_method="osd_0", osd_order=0, max_iter=max_iter),
     # LSD 논문 설정 (Hillmann et al.): order 0, min-sum, 30회, a=0.625.
-    "bplsd_0": lambda H, ch: make_lsd_decoder(H, ch),
+    "bplsd_0": lambda H, ch, max_iter=30: make_lsd_decoder(
+        H, ch, max_iter=max_iter),
     # BB 스타일의 고차 sweep을 붙인 LSD, 비교용.
-    "bplsd_cs7": lambda H, ch: make_lsd_decoder(H, ch, lsd_method="lsd_cs",
-                                                lsd_order=7),
+    "bplsd_cs7": lambda H, ch, max_iter=30: make_lsd_decoder(
+        H, ch, lsd_method="lsd_cs", lsd_order=7, max_iter=max_iter),
 }
 
 

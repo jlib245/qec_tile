@@ -44,13 +44,14 @@ def test_unknown_decoder_is_rejected():
 def test_registry_mirrors_serial_except_lsd_cs():
     """SinterLsdDecoder에는 lsd_method 손잡이가 없어서 bplsd_cs7은 serial 전용.
 
-    vibecoset_200은 반대 방향이다 -- coset 판별에 observable 행렬이 필요한데
-    DECODERS의 build(H, channel) 규약에는 넘길 자리가 없어 sinter 전용이다.
+    vibecoset_*는 반대 방향이다 -- coset 판별에 observable 행렬이 필요해서
+    DECODERS가 아니라 OBSERVABLE_DECODERS에 있다. 손으로 유지하는 예외 목록 대신
+    두 레지스트리의 합집합과 견주므로, 디코더를 추가할 때 여기를 고칠 일이 없다.
     """
-    from qec_tile.decode import DECODERS
+    from qec_tile.decode import DECODERS, OBSERVABLE_DECODERS
     from qec_tile.sinter_sampling import SINTER_DECODERS
-    assert (set(SINTER_DECODERS) - {"vibecoset_200", "vibecoset_200_m20", "vibecoset_200_m30", "vibecoset_200_m50"}
-            == set(DECODERS) - {"bplsd_cs7"})
+    assert (set(SINTER_DECODERS)
+            == (set(DECODERS) | set(OBSERVABLE_DECODERS)) - {"bplsd_cs7"})
 
 
 def test_vibelsd_collects_through_sinter():
