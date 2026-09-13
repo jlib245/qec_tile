@@ -84,7 +84,7 @@ def _run_chunk(task: tuple[int, int, int]) -> tuple[int, int, int]:
 
 
 def parallel_failure_counts(circuit, shots: int, decoder: str, *,
-                            seed: int = 0, workers: int = 8,
+                            seed: int = 42, workers: int = 8,
                             chunk: int = 100,
                             max_errors: int | None = None,
                             max_iter: int | None = None) -> FailureCounts:
