@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import signal
 import sys
 import time
 
@@ -51,6 +52,8 @@ def _init_worker(circuit_text: str, decoder: str,
     조각마다 디코더를 만들면 무거운 디코더에서 재생성 비용이 조각 수만큼 붙는다 --
     sinter 경로가 배치마다 앙상블을 다시 지어 ``MemoryError``까지 갔던 그 문제다.
     """
+    # Ctrl+C는 부모만 처리한다. worker마다 traceback을 찍으면 24개분이 쏟아진다.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     circuit = stim.Circuit(circuit_text)
     matrices = detector_error_model_to_check_matrices(
         circuit.detector_error_model(), allow_undecomposed_hyperedges=True)
@@ -99,7 +102,9 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
                             chunk: int = 100,
                             max_errors: int | None = None,
                             max_iter: int | None = None,
-                            progress: bool = True) -> FailureCounts:
+                            progress: bool = True, start_chunk: int = 0,
+                            start_counts: tuple[int, int, int] | None = None,
+                            checkpoint=None) -> FailureCounts:
     """``shots``개를 병렬로 디코딩한다. 시드만 같으면 재현된다.
 
     ``max_iter``가 None이면 디코더의 레지스트리 기본값을 쓴다.
@@ -114,9 +119,15 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
         raise ValueError("chunk must be positive")
     k = circuit.num_observables
     sizes = [min(chunk, shots - start) for start in range(0, shots, chunk)]
-    tasks = [(i, size, seed) for i, size in enumerate(sizes)]
+    total, block_fails, flips = start_counts or (0, 0, 0)
+    # 조각 번호는 그대로 두고 앞부분만 잘라낸다 -- 번호가 시드를 정하므로 다시
+    # 매기면 이어받은 조각이 처음부터 돌렸을 때와 다른 shot을 뽑는다.
+    tasks = [(i, size, seed) for i, size in enumerate(sizes)][start_chunk:]
+    if not tasks or (max_errors is not None and block_fails >= max_errors):
+        return FailureCounts(total, block_fails, flips, k)
 
-    total = block_fails = flips = 0
+    done = start_chunk
+    session = 0                      # 이번 실행에서 민 shot (ETA는 이 기준이다)
     start = time.monotonic()
     last = 0.0
     # fork는 스레드를 띄운 부모(numpy/BLAS)에서 자식이 교착에 빠질 수 있고,
@@ -127,15 +138,20 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
                   initargs=(str(circuit), decoder, max_iter)) as pool:
         for size, fails, chunk_flips in pool.imap(_run_chunk, tasks):
             total += size
+            session += size
             block_fails += fails
             flips += chunk_flips
+            done += 1
+            if checkpoint is not None:      # 쓰기 빈도는 호출자가 정한다
+                checkpoint(done, total, block_fails, flips)
             now = time.monotonic()
             # 조각이 수천 개라 매번 찍으면 출력이 병목이 된다. stderr로 보내고
             # \r로 한 줄을 덮어쓴다 (CSV/stdout은 깨끗하게 둔다).
             if progress and (now - last > 1.0 or total == shots):
                 last = now
                 elapsed = now - start
-                eta = (shots - total) * elapsed / total
+                # total에는 이전 실행분이 섞여 있어 속도 계산에 쓰면 안 된다.
+                eta = (shots - total) * elapsed / session
                 if max_errors is not None and block_fails:
                     # --max-errors면 보통 오류 쪽이 먼저 찬다. shot 기준만 쓰면
                     # "1000만까지 며칠"이라는 쓸모없는 숫자가 나온다.

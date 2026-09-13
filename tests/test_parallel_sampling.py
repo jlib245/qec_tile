@@ -9,20 +9,33 @@ from qec_tile.parallel_sampling import _chunk_seed, parallel_failure_counts
 
 
 def small_circuit():
-    """초 단위로 끝나는 회로. d=3, 3라운드."""
+    """초 단위로 끝나는 회로. d=3, 3라운드.
+
+    p=0.05는 200 shot에 오류 56개를 낸다 (p=0.02면 10개). 오류가 적으면 두 실행이
+    서로 다른 shot을 봐도 카운트가 우연히 일치해 재현성 테스트가 헛돈다.
+    """
     return stim.Circuit.generated("surface_code:rotated_memory_z",
                                   distance=3, rounds=3,
-                                  after_clifford_depolarization=0.02)
+                                  after_clifford_depolarization=0.05)
+
+
+def chunk_trace(circuit, **kwargs):
+    """조각마다의 누적 ``(done, shots, fails, flips)`` 수열.
+
+    총합 하나만 비교하면 우연 일치가 10%대다 (오류 56개면 표준편차가 6). 조각
+    4개의 수열을 비교하면 그 확률이 자릿수로 떨어진다.
+    """
+    seen = []
+    parallel_failure_counts(circuit, 200, "bposd_0", seed=3, chunk=50,
+                            progress=False,
+                            checkpoint=lambda *a: seen.append(a), **kwargs)
+    return seen
 
 
 def test_counts_are_reproducible():
-    """같은 인자면 카운트가 완전히 같다 — sinter가 못 하는 것."""
+    """같은 인자면 조각 수열까지 완전히 같다 — sinter가 못 하는 것."""
     circuit = small_circuit()
-    first = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
-                                    workers=2, chunk=50)
-    second = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
-                                     workers=2, chunk=50)
-    assert first == second
+    assert chunk_trace(circuit, workers=2) == chunk_trace(circuit, workers=2)
 
 
 def test_the_worker_count_does_not_change_the_data():
@@ -32,11 +45,7 @@ def test_the_worker_count_does_not_change_the_data():
     고정 ``chunk``를 쓰는 설계가 여기에 걸려 있다.
     """
     circuit = small_circuit()
-    few = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
-                                  workers=2, chunk=50)
-    many = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
-                                   workers=4, chunk=50)
-    assert few == many
+    assert chunk_trace(circuit, workers=2) == chunk_trace(circuit, workers=4)
 
 
 def test_chunk_seeds_are_distinct():
@@ -58,9 +67,49 @@ def test_max_errors_stops_at_a_chunk_boundary():
     """
     circuit = small_circuit()
     first = parallel_failure_counts(circuit, 2000, "bposd_0", seed=5,
-                                    workers=4, chunk=50, max_errors=3)
+                                    workers=4, chunk=50, max_errors=20,
+                                    progress=False)
     second = parallel_failure_counts(circuit, 2000, "bposd_0", seed=5,
-                                     workers=2, chunk=50, max_errors=3)
+                                     workers=2, chunk=50, max_errors=20,
+                                     progress=False)
     assert first == second
     assert first.shots % 50 == 0 or first.shots == 2000
-    assert first.block_fails >= 3
+    assert first.block_fails >= 20
+
+
+def test_resuming_matches_running_from_the_start():
+    """조각 k부터 이어간 결과가 처음부터 완주한 것과 같다.
+
+    이어받기의 근거다. tasks의 조각 번호를 다시 매기면 이어받은 조각이 다른
+    시드를 받아 같은 shot을 두 번 세게 되고, 여기서 갈린다.
+    """
+    circuit = small_circuit()
+    whole = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
+                                    workers=2, chunk=50, progress=False)
+    head = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
+                                   workers=2, chunk=50, progress=False,
+                                   start_chunk=0, start_counts=(0, 0, 0))
+    part = parallel_failure_counts(circuit, 100, "bposd_0", seed=3,
+                                   workers=2, chunk=50, progress=False)
+    rest = parallel_failure_counts(
+        circuit, 200, "bposd_0", seed=3, workers=2, chunk=50, progress=False,
+        start_chunk=2,
+        start_counts=(part.shots, part.block_fails, part.logical_flips))
+    assert head == whole
+    assert rest == whole
+
+
+def test_checkpoint_reports_every_chunk():
+    """조각마다 (done, shots, fails, flips)를 보고한다 -- 상태 파일의 재료다.
+
+    done이 건너뛰면 이어받기 지점이 틀어지고, 마지막 조각이 빠지면 상태 파일이
+    항상 한 조각 뒤처진다.
+    """
+    circuit = small_circuit()
+    seen = []
+    result = parallel_failure_counts(circuit, 200, "bposd_0", seed=3,
+                                     workers=2, chunk=50, progress=False,
+                                     checkpoint=lambda *a: seen.append(a))
+    assert [done for done, *_ in seen] == [1, 2, 3, 4]
+    assert seen[-1][1:] == (result.shots, result.block_fails,
+                            result.logical_flips)

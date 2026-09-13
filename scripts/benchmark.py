@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
+import sys
 import time
 
 from qec_tile.circuit import (circuit_failure_counts, memory_z_base,
@@ -137,29 +139,119 @@ def parallel_sweep(args, writer, csv_file, done) -> None:
                 circuits[(label, p)] = NoiseModel.SI1000(p).noisy_circuit(base)
     if not circuits:
         return
-    if args.reproducible:              # 시드로 재현되는 경로: 회로마다 순차로
-        stats = {key: parallel_failure_counts(
-                     circuit, args.shots, args.decoder, seed=args.seed,
-                     workers=args.workers, chunk=args.chunk,
-                     max_errors=args.max_errors, max_iter=args.max_iter)
-                 for key, circuit in circuits.items()}
-    else:
-        stats = collect(circuits, args.decoder, max_shots=args.shots,
-                        max_errors=args.max_errors, workers=args.workers,
-                        max_iter=args.max_iter)
-    for (label, p), counts in sorted(stats.items()):
-        code, rounds = codes[label]
-        rate = counts.block_fails / counts.shots
-        writer.writerow(dict(
-            tile=(args.word or args.tile), decoder=args.decoder,
-            noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
-            p=p, meas_error="",
-            seed=(args.seed if args.reproducible else ""),
-            shots=counts.shots,
-            fails=counts.block_fails, flips=counts.logical_flips,
-            rate=rate, sec=""))
-        csv_file.flush()
-        print(f"done  L={label} p={p} rate={rate:.4f} ({counts.shots} shots)")
+    if not args.reproducible:
+        for key, counts in sorted(collect(
+                circuits, args.decoder, max_shots=args.shots,
+                max_errors=args.max_errors, workers=args.workers,
+                max_iter=args.max_iter).items()):
+            write_point(writer, csv_file, args, codes, key, counts)
+        return
+
+    # 재현 경로: 점마다 돌고 바로 쓴다. 모아뒀다가 쓰면 중간에 죽을 때 끝난 점까지
+    # 잃는다 (상태 파일에서는 이미 지워져 이어받지도 못한다).
+    header = dict(decoder=args.decoder, seed=args.seed, chunk=args.chunk,
+                  shots=args.shots, max_errors=args.max_errors,
+                  max_iter=args.max_iter)
+    state_path = _state_path(args.out)
+    points = load_state(state_path, header)
+    for key, circuit in sorted(circuits.items()):
+        tag = f"{key[0]}|{key[1]}"
+        at = points.get(tag, {})
+        last = [0.0, at.get("chunks_done", 0)]   # [마지막 저장 시각, 조각 수]
+
+        # 기본 인자로 묶는 이유: 파이썬은 루프 변수를 늦게 묶어서, 안 묶으면 모든
+        # 점이 마지막 tag를 쓴다. 점이 하나면 안 드러나는 종류의 버그다.
+        def note(done, shots, fails, flips, tag=tag, last=last,
+                 gap=args.workers):
+            now = time.monotonic()
+            if now - last[0] < STATE_INTERVAL and done - last[1] < gap:
+                return
+            last[:] = [now, done]
+            points[tag] = dict(chunks_done=done, shots=shots,
+                               fails=fails, flips=flips)
+            save_state(state_path, header, points)
+
+        if at:
+            print(f"resume L={key[0]} p={key[1]} "
+                  f"({at['shots']:,} shots already)", file=sys.stderr)
+        counts = parallel_failure_counts(
+            circuit, args.shots, args.decoder, seed=args.seed,
+            workers=args.workers, chunk=args.chunk,
+            max_errors=args.max_errors, max_iter=args.max_iter,
+            start_chunk=at.get("chunks_done", 0),
+            start_counts=(at.get("shots", 0), at.get("fails", 0),
+                          at.get("flips", 0)),
+            checkpoint=note)
+        write_point(writer, csv_file, args, codes, key, counts)
+        points.pop(tag, None)            # 이 점은 CSV에 들어갔다
+        save_state(state_path, header, points)
+
+
+def write_point(writer, csv_file, args, codes, key, counts) -> None:
+    """점 하나를 CSV에 적는다. 두 수집 경로가 공유한다."""
+    label, p = key
+    code, rounds = codes[label]
+    rate = counts.block_fails / counts.shots
+    writer.writerow(dict(
+        tile=(args.word or args.tile), decoder=args.decoder,
+        noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
+        p=p, meas_error="",
+        seed=(args.seed if args.reproducible else ""),
+        shots=counts.shots,
+        fails=counts.block_fails, flips=counts.logical_flips,
+        rate=rate, sec=""))
+    csv_file.flush()
+    print(f"done  L={label} p={p} rate={rate:.4f} ({counts.shots} shots)")
+
+
+# 상태 파일 저장 조건: 이 시간이 지나거나 worker 한 바퀴만큼 조각이 끝나면, 둘 중
+# 먼저 오는 쪽에 쓴다. 시간만 쓰면 빠른 디코더에서 그 사이에 조각 수십 개가 끝나
+# 날아가고, 조각 수만 쓰면 느린 디코더에서 저장이 너무 드물어진다. 파일은 1KB
+# 미만이라 쓰기 자체는 싸다.
+STATE_INTERVAL = 30.0
+
+
+def _state_path(out: str) -> str:
+    """CSV 옆의 상태 파일. 완주하면 지워지므로 존재 자체가 "중단됨"을 뜻한다."""
+    return out + ".state.json"
+
+
+def load_state(path: str, header: dict) -> dict:
+    """이어받을 점들. 머리말이 다르면 버린다.
+
+    chunk나 seed가 다르면 조각 경계와 shot 집합이 어긋나므로, 조용히 이어받으면
+    서로 다른 실행의 데이터가 한 행에 섞인다. 반대로 말없이 처음부터 시작하면
+    사용자가 왜 이어받지 않는지 모른다. 그래서 버리되 이유를 찍는다.
+    """
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        state = json.load(f)
+    stale = {k: (state.get(k), v) for k, v in header.items()
+             if state.get(k) != v}
+    if stale:
+        print(f"이전 상태를 버립니다 ({path}): "
+              + ", ".join(f"{k} {was!r} -> {now!r}"
+                          for k, (was, now) in stale.items()),
+              file=sys.stderr)
+        return {}
+    return state.get("points", {})
+
+
+def save_state(path: str, header: dict, points: dict) -> None:
+    """원자적으로 갈아끼운다. 쓰는 도중 죽어도 기존 상태가 남는다.
+
+    같은 파일에 직접 쓰다 죽으면 JSON이 잘려 다음 실행의 ``json.load``가 터지고,
+    그러면 이어받기가 아니라 전체를 다시 돌게 된다.
+    """
+    if not points:                       # 다 끝났다 -- 흔적을 남기지 않는다
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({**header, "points": points}, f)
+    os.replace(tmp, path)
 
 
 def already_done(path: str) -> set[tuple]:
