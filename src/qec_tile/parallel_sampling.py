@@ -133,6 +133,11 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
     # fork는 스레드를 띄운 부모(numpy/BLAS)에서 자식이 교착에 빠질 수 있고,
     # Windows는 어차피 spawn이다. 명시해서 두 플랫폼 동작을 같게 만든다.
     # initargs가 (str, str, int|None)뿐이라 pickle도 문제없다.
+    if progress:
+        # 조각이 크면 첫 진행 줄이 수십 분 뒤에 나온다. 시작했다는 것과 조각 수를
+        # 먼저 알려야 죽은 건지 도는 건지 알 수 있다.
+        print(f"  collecting {shots:,} shots, {len(tasks):,} chunks of {chunk}, "
+              f"{workers} workers", file=sys.stderr, flush=True)
     ctx = mp.get_context("spawn")
     with ctx.Pool(workers, initializer=_init_worker,
                   initargs=(str(circuit), decoder, max_iter)) as pool:

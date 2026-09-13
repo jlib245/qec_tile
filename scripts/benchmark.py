@@ -84,8 +84,12 @@ def uniform_noise(p: float) -> NoiseModel:
                       noisy_gates={"CX": p, "CXSWAP": p, "SWAP": p, "R": p,
                                    "RX": p, "M": p, "MR": p, "MRX": p})
 
+# chunk도 데이터를 정하는 인자다: 조각 i가 shot [i*chunk, (i+1)*chunk)를 맡고
+# 시드가 조각 번호에서 나오므로, chunk가 다르면 같은 시드도 다른 shot을 뽑는다.
+# 기록해두지 않으면 완성된 행으로부터 데이터를 다시 만들 수 없다.
 FIELDS = ["tile", "decoder", "noise", "rounds", "L", "n", "k", "p",
-          "meas_error", "seed", "shots", "fails", "flips", "rate", "sec"]
+          "meas_error", "seed", "chunk", "shots", "fails", "flips",
+          "rate", "sec"]
 
 
 def parse_floats(spec: str) -> list[float]:
@@ -197,6 +201,7 @@ def write_point(writer, csv_file, args, codes, key, counts) -> None:
         noise=args.noise, rounds=rounds, L=label, n=code.n, k=code.k,
         p=p, meas_error="",
         seed=(args.seed if args.reproducible else ""),
+        chunk=(args.chunk if args.reproducible else ""),
         shots=counts.shots,
         fails=counts.block_fails, flips=counts.logical_flips,
         rate=rate, sec=""))
