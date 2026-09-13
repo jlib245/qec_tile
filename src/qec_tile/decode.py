@@ -119,7 +119,10 @@ class VibeLsdDecoder:
         self.log_weight = np.log((1 - channel) / channel)   # 열별 -log 우도
 
     def _collect(self, syndrome):
-        """앙상블을 훑어 ``(found, llrs)``. found는 수렴 iteration 최소 M개다.
+        """앙상블을 훑어 ``(found, mean_llr)``. found는 수렴 iteration 최소 M개다.
+
+        ``mean_llr``은 LSD fallback에 넘길 정규화 LLR의 평균이고, 수렴한 멤버가
+        하나도 없을 때만 쓰인다.
 
         논문은 L개를 동시에 돌려 M번째가 수렴하면 나머지를 끊는다. 순차로 돌되
         예산을 그 M번째 값으로 깎으면 같은 집합이 나온다 -- 예산 안에 수렴 못 하는
@@ -127,7 +130,11 @@ class VibeLsdDecoder:
         멤버가 있을 수 있어서다.
         """
         budget = self.max_iter
-        found, llrs = [], []             # found: (iter, weight, correction)
+        found = []                       # (iter, weight, correction)
+        # LLR은 합만 누적한다. 리스트로 쌓으면 멤버 200개 x 길이 6170 float64 =
+        # shot당 9.9 MB를 할당하는데, 하나라도 수렴하면 통째로 버린다. worker 24개가
+        # 그러면 메모리 대역폭이 병목이 된다.
+        llr_sum, llr_count = None, 0
         for order in self.orders:
             self.bp.serial_schedule_order = order   # 둘 다 decode보다 먼저다
             self.bp.max_iter = budget
@@ -135,7 +142,12 @@ class VibeLsdDecoder:
             llr = np.asarray(self.bp.log_prob_ratios, dtype=float)
             norm = np.linalg.norm(llr)
             if norm > 0:
-                llrs.append(llr / norm)
+                scaled = llr / norm
+                if llr_sum is None:
+                    llr_sum = scaled
+                else:
+                    llr_sum += scaled
+                llr_count += 1
             if self.bp.converge:
                 found.append((self.bp.iter,
                               float(self.log_weight @ candidate),
@@ -144,16 +156,18 @@ class VibeLsdDecoder:
                 del found[self.converged:]
                 if len(found) == self.converged:
                     budget = found[-1][0]           # M번째로 빠른 수렴
-        return found, llrs
+        # 논문 step 5의 (1/L) Σ LLR_i / ‖LLR_i‖. np.mean의 pairwise 합산과 달리
+        # 순차 합산이라 부동소수점 결과가 미세하게 다를 수 있다.
+        return found, (None if llr_count == 0 else llr_sum / llr_count)
 
     def decode(self, syndrome):
         """논문 III.4.2. 수렴 후보 중 prior 우도가 가장 큰(가장 가벼운) 것."""
-        found, llrs = self._collect(syndrome)
+        found, mean_llr = self._collect(syndrome)
         if found:
             return min(found, key=lambda c: c[1])[2]
         # 수렴이 0개라 예산이 한 번도 안 줄었다 -- L개 전부가 full max_iter로 돌았고
-        # 논문 step 5의 (1/L) Σ LLR_i / ‖LLR_i‖가 그대로 성립한다.
-        return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
+        # 논문 step 5의 평균이 그대로 성립한다.
+        return self.lsd.decode(syndrome, mean_llr)
 
 
 def _log_mass(weights) -> float:
@@ -184,9 +198,9 @@ class VibeCosetDecoder(VibeLsdDecoder):
 
     def decode(self, syndrome):
         """coset 확률 합이 최대인 class의 대표를 돌려준다."""
-        found, llrs = self._collect(syndrome)
+        found, mean_llr = self._collect(syndrome)
         if not found:
-            return self.lsd.decode(syndrome, np.mean(llrs, axis=0))
+            return self.lsd.decode(syndrome, mean_llr)
 
         # 서로 다른 순열이 같은 벡터로 수렴하는 일이 흔하다. 확률 합은 서로 다른
         # 오류 패턴에 대한 합이므로, 중복을 세면 그 coset이 부풀려진다.
