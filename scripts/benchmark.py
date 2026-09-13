@@ -253,6 +253,11 @@ def main():
                     help="stop a point after this many errors (needs --workers)")
     ap.add_argument("--max-iter", type=int, default=None,
                     help="BP iterations; vibelsd_200 defaults to 15 per round")
+    route = ap.add_mutually_exclusive_group()
+    route.add_argument("--sinter", action="store_true",
+                       help="collect through sinter (cannot be seeded)")
+    route.add_argument("--parallel", action="store_true",
+                       help="seeded multiprocessing pool (the default)")
     ap.add_argument("--chunk", type=int, default=100,
                     help="shots per chunk in the reproducible path")
     ap.add_argument("--out", default=None)
@@ -284,10 +289,14 @@ def main():
                                          sweep_rounds(args), args.workers)
     except ValueError as exc:
         ap.error(str(exc))
-    # --workers + --seed: sinter 대신 재현 가능한 병렬 경로 (parallel_sampling)
-    args.reproducible = args.workers is not None and args.seed is not None
+    # 수집기는 --sinter/--parallel이 고른다. 둘 다 없으면 재현되는 쪽이 기본이다.
+    if (args.sinter or args.parallel) and args.workers is None:
+        ap.error("--sinter/--parallel need --workers")
+    args.reproducible = args.workers is not None and not args.sinter
+    if args.sinter and args.seed is not None:
+        ap.error("sinter cannot be seeded; drop --seed or use --parallel")
     if args.seed is None:
-        args.seed = 0                          # serial 기본값
+        args.seed = 42 if args.reproducible else 0
 
     if args.out is None:
         stem = args.word if args.word else args.tile

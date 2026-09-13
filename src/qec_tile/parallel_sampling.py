@@ -12,12 +12,23 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import sys
+import time
 
 import numpy as np
 import stim
 from ldpc.ckt_noise.dem_matrices import detector_error_model_to_check_matrices
 
 from .decode import DECODERS, OBSERVABLE_DECODERS, FailureCounts
+
+
+def _format_duration(seconds: float) -> str:
+    """5s / 12m30s / 3.4h."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds // 60:.0f}m{seconds % 60:02.0f}s"
+    return f"{seconds / 3600:.1f}h"
 
 
 def _chunk_seed(seed: int, index: int) -> int:
@@ -87,7 +98,8 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
                             seed: int = 42, workers: int = 8,
                             chunk: int = 100,
                             max_errors: int | None = None,
-                            max_iter: int | None = None) -> FailureCounts:
+                            max_iter: int | None = None,
+                            progress: bool = True) -> FailureCounts:
     """``shots``개를 병렬로 디코딩한다. 시드만 같으면 재현된다.
 
     ``max_iter``가 None이면 디코더의 레지스트리 기본값을 쓴다.
@@ -105,6 +117,8 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
     tasks = [(i, size, seed) for i, size in enumerate(sizes)]
 
     total = block_fails = flips = 0
+    start = time.monotonic()
+    last = 0.0
     # fork는 스레드를 띄운 부모(numpy/BLAS)에서 자식이 교착에 빠질 수 있고,
     # Windows는 어차피 spawn이다. 명시해서 두 플랫폼 동작을 같게 만든다.
     # initargs가 (str, str, int|None)뿐이라 pickle도 문제없다.
@@ -115,6 +129,26 @@ def parallel_failure_counts(circuit, shots: int, decoder: str, *,
             total += size
             block_fails += fails
             flips += chunk_flips
+            now = time.monotonic()
+            # 조각이 수천 개라 매번 찍으면 출력이 병목이 된다. stderr로 보내고
+            # \r로 한 줄을 덮어쓴다 (CSV/stdout은 깨끗하게 둔다).
+            if progress and (now - last > 1.0 or total == shots):
+                last = now
+                elapsed = now - start
+                eta = (shots - total) * elapsed / total
+                if max_errors is not None and block_fails:
+                    # --max-errors면 보통 오류 쪽이 먼저 찬다. shot 기준만 쓰면
+                    # "1000만까지 며칠"이라는 쓸모없는 숫자가 나온다.
+                    eta = min(eta, (max_errors - block_fails) * elapsed
+                              / block_fails)
+                errs = ("" if max_errors is None
+                        else f" errors {block_fails}/{max_errors}")
+                print(f"\r  {total:,}/{shots:,} shots{errs}  "
+                      f"{_format_duration(elapsed)} elapsed  "
+                      f"eta {_format_duration(max(eta, 0))}   ",
+                      end="", file=sys.stderr, flush=True)
             if max_errors is not None and block_fails >= max_errors:
                 break                  # 조각 단위로만 멈춘다 -- 결정적이다
+    if progress:
+        print(file=sys.stderr)
     return FailureCounts(total, block_fails, flips, k)
